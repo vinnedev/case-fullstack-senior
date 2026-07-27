@@ -24,6 +24,8 @@ def process_once() -> bool:
             time.sleep(1)  # simula trabalho
             session.add(JobResult(job_id=job.id, payload=f"resultado sensível da empresa {job.company_id}"))
             company = session.get(Company, job.company_id)
+            if company is None:
+                raise RuntimeError(f"company {job.company_id} não encontrada para o job {job.id}")
             company.job_quota -= 1
             job.status = "done"
             event.add(outcome="done", attempts=job.attempts)
