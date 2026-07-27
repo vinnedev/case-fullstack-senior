@@ -3,6 +3,10 @@ import threading
 
 import psycopg
 
+from env import load_env
+
+load_env()
+
 _lock = threading.Lock()
 _active_conns: set[psycopg.Connection] = set()
 

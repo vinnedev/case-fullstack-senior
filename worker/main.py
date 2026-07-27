@@ -1,5 +1,9 @@
 import os, time, psycopg
 
+from env import load_env
+
+load_env()
+
 def process_once(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT id, company_id, kind FROM jobs WHERE status='queued' ORDER BY id LIMIT 1")
@@ -21,4 +25,5 @@ def main():
     while True:
         if not process_once(conn): time.sleep(2)
         
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
