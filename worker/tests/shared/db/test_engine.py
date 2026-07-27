@@ -53,7 +53,7 @@ def test_job_and_result_relationship(session_factory):
     with session_factory() as session:
         job = session.execute(select(Job)).scalar_one()
         assert job.status == "queued"
-        assert job.results[0].payload == "ok"
+        assert job.result.payload == "ok"
 
 
 def test_dispose_engine_resets_singletons(monkeypatch):
