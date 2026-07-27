@@ -3,7 +3,7 @@ import threading
 
 import psycopg
 
-from env import load_env
+from shared.config.env import load_env, require_env
 
 load_env()
 
@@ -30,7 +30,7 @@ class _TrackedConnection:
 
 
 def get_conn():
-    conn = psycopg.connect(os.environ["DATABASE_URL"])
+    conn = psycopg.connect(require_env("DATABASE_URL"))
     with _lock:
         _active_conns.add(conn)
     return _TrackedConnection(conn)

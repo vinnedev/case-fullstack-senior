@@ -13,3 +13,12 @@ dependencies = [
     "psycopg>=3.3.4",
     "uvicorn>=0.51.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

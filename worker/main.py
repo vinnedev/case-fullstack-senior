@@ -1,6 +1,6 @@
-import os, time, psycopg
+import time, psycopg
 
-from env import load_env
+from shared.config.env import load_env, require_env
 
 load_env()
 
@@ -21,7 +21,7 @@ def process_once(conn):
         return True
     
 def main():
-    conn = psycopg.connect(os.environ["DATABASE_URL"])
+    conn = psycopg.connect(require_env("DATABASE_URL"))
     while True:
         if not process_once(conn): time.sleep(2)
         
