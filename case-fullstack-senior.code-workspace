@@ -1,0 +1,15 @@
+{
+  "folders": [
+    { "name": "root", "path": "." },
+    { "name": "api", "path": "api" },
+    { "name": "worker", "path": "worker" },
+    { "name": "web", "path": "web" }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/.venv": false
+    },
+    "python.terminal.activateEnvironment": true
+  }
+}
