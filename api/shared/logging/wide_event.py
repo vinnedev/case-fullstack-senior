@@ -1,15 +1,16 @@
 import json
-import os
 import random
 import sys
 import time
 import uuid
 from contextvars import ContextVar
 
+from shared.config.settings import get_settings
+
 _current_event: ContextVar["WideEvent | None"] = ContextVar("wide_event", default=None)
 
-SLOW_THRESHOLD_MS = float(os.environ.get("LOG_SLOW_THRESHOLD_MS", "1000"))
-SUCCESS_SAMPLE_RATE = float(os.environ.get("LOG_SUCCESS_SAMPLE_RATE", "1.0"))
+SLOW_THRESHOLD_MS = get_settings().log_slow_threshold_ms
+SUCCESS_SAMPLE_RATE = get_settings().log_success_sample_rate
 
 
 class WideEvent:

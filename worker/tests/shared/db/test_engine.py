@@ -19,8 +19,13 @@ def session_factory(monkeypatch):
 
 
 def test_database_url_converts_to_psycopg_driver(monkeypatch):
+    from shared.config.settings import get_settings
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h:5432/d")
-    assert engine_module.database_url() == "postgresql+psycopg://u:p@h:5432/d"
+    get_settings.cache_clear()
+    try:
+        assert engine_module.database_url() == "postgresql+psycopg://u:p@h:5432/d"
+    finally:
+        get_settings.cache_clear()
 
 
 def test_session_scope_commits_on_success(session_factory):
