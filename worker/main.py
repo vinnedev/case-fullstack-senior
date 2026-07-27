@@ -1,31 +1,34 @@
-import time, psycopg
+import time
 
-from shared.config.env import load_env, require_env
+from sqlalchemy import select
+
+from features.companies.models import Company
+from features.jobs.models import Job, JobResult
+from shared.db.engine import session_scope
 from shared.logging.wide_event import WideEvent, start_event
-
-load_env()
 
 SERVICE = "worker"
 
-def process_once(conn):
-    with conn.cursor() as cur:
-        cur.execute("SELECT id, company_id, kind FROM jobs WHERE status='queued' ORDER BY id LIMIT 1")
-        row = cur.fetchone()
-        if not row: return False
-        job_id, company_id, kind = row
-        event = start_event(SERVICE, "job_processed", job_id=job_id, company_id=company_id, job_kind=kind)
+def process_once() -> bool:
+    with session_scope() as session:
+        job = session.execute(
+            select(Job).where(Job.status == "queued").order_by(Job.id).limit(1).with_for_update(skip_locked=True)
+        ).scalar_one_or_none()
+        if not job:
+            return False
+        event = start_event(SERVICE, "job_processed", job_id=job.id, company_id=job.company_id, job_kind=job.kind)
         try:
-            cur.execute("UPDATE jobs SET status='running', attempts=attempts+1, updated_at=now() WHERE id=%s", (job_id,))
-            conn.commit()
+            job.status = "running"
+            job.attempts += 1
+            session.flush()
             time.sleep(1)  # simula trabalho
-            cur.execute("INSERT INTO job_results (job_id, payload) VALUES (%s,%s)", (job_id, f"resultado sensível da empresa {company_id}"))
-            cur.execute("UPDATE companies SET job_quota = job_quota - 1 WHERE id=%s", (company_id,))
-            cur.execute("UPDATE jobs SET status='done', updated_at=now() WHERE id=%s", (job_id,))
-            conn.commit()
-            event.add(outcome="done")
+            session.add(JobResult(job_id=job.id, payload=f"resultado sensível da empresa {job.company_id}"))
+            company = session.get(Company, job.company_id)
+            company.job_quota -= 1
+            job.status = "done"
+            event.add(outcome="done", attempts=job.attempts)
             return True
         except Exception as exc:
-            conn.rollback()
             event.error(exc, outcome="failed")
             raise
         finally:
@@ -33,9 +36,9 @@ def process_once(conn):
 
 def main():
     WideEvent(SERVICE, "startup").emit()
-    conn = psycopg.connect(require_env("DATABASE_URL"))
     while True:
-        if not process_once(conn): time.sleep(2)
+        if not process_once():
+            time.sleep(2)
 
 if __name__ == "__main__":
     main()

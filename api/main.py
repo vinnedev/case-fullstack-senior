@@ -7,8 +7,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
 from auth import current_ctx
-from db import get_conn, close_all_connections
+from features.companies.models import Company
+from features.jobs.models import Job, JobResult
+from shared.db.engine import dispose_engine, get_session
 from shared.logging.wide_event import WideEvent, start_event, current_event
 
 SERVICE = "api"
@@ -56,8 +61,8 @@ async def lifespan(app: FastAPI):
     yield
     event = WideEvent(SERVICE, "shutdown")
     await shutdown.drain(SHUTDOWN_DRAIN_TIMEOUT)
-    close_all_connections()
-    event.add(drained=True, db_connections_closed=True).emit()
+    dispose_engine()
+    event.add(drained=True, db_pool_disposed=True).emit()
 
 
 API_DESCRIPTION = """
@@ -131,7 +136,7 @@ class JobDetail(BaseModel):
     status: str
 
 
-class JobResult(BaseModel):
+class JobResultOut(BaseModel):
     payload: str
 
 
@@ -157,17 +162,21 @@ class AdminJob(BaseModel):
     response_model=list[JobSummary],
     responses={401: {"description": "Header X-Auth ausente ou inválido"}},
 )
-def list_jobs(ctx=Depends(current_ctx)):
+def list_jobs(ctx=Depends(current_ctx), session: Session = Depends(get_session)):
     current_event().add(company_id=ctx["company_id"], role=ctx["role"])
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, kind, status, created_at FROM jobs WHERE company_id=%s ORDER BY created_at DESC", (ctx["company_id"],))
-        rows = cur.fetchall()
-        out = []
-        for r in rows:
-            cur.execute("SELECT count(*) FROM job_results WHERE job_id=%s", (r[0],))
-            out.append({"id": r[0], "kind": r[1], "status": r[2], "created_at": r[3].isoformat(), "result_count": cur.fetchone()[0]})
-        current_event().add(jobs_returned=len(out))
-        return out
+    rows = session.execute(
+        select(Job, func.count(JobResult.id))
+        .outerjoin(JobResult, JobResult.job_id == Job.id)
+        .where(Job.company_id == ctx["company_id"])
+        .group_by(Job.id)
+        .order_by(Job.created_at.desc())
+    ).all()
+    out = [
+        {"id": job.id, "kind": job.kind, "status": job.status, "created_at": job.created_at.isoformat(), "result_count": count}
+        for job, count in rows
+    ]
+    current_event().add(jobs_returned=len(out))
+    return out
 
 @app.get(
     "/jobs/{job_id}",
@@ -176,29 +185,27 @@ def list_jobs(ctx=Depends(current_ctx)):
     response_model=JobDetail,
     responses={404: {"description": "Job não encontrado"}},
 )
-def get_job(job_id: int, ctx=Depends(current_ctx)):
+def get_job(job_id: int, ctx=Depends(current_ctx), session: Session = Depends(get_session)):
     current_event().add(company_id=ctx["company_id"], job_id=job_id)
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, company_id, kind, status FROM jobs WHERE id=%s", (job_id,))
-        row = cur.fetchone()
-        if not row: raise HTTPException(404, "not found")
-        current_event().add(job_kind=row[2], job_status=row[3])
-        return {"id": row[0], "company_id": row[1], "kind": row[2], "status": row[3]}
+    job = session.get(Job, job_id)
+    if not job:
+        raise HTTPException(404, "not found")
+    current_event().add(job_kind=job.kind, job_status=job.status)
+    return {"id": job.id, "company_id": job.company_id, "kind": job.kind, "status": job.status}
 
 @app.get(
     "/jobs/{job_id}/result",
     tags=["jobs"],
     summary="Lê o resultado de um job concluído",
-    response_model=JobResult,
+    response_model=JobResultOut,
     responses={404: {"description": "Job sem resultado disponível"}},
 )
-def get_result(job_id: int, ctx=Depends(current_ctx)):
+def get_result(job_id: int, ctx=Depends(current_ctx), session: Session = Depends(get_session)):
     current_event().add(company_id=ctx["company_id"], job_id=job_id)
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT payload FROM job_results WHERE job_id=%s", (job_id,))
-        row = cur.fetchone()
-        if not row: raise HTTPException(404, "no result")
-        return {"payload": row[0]}
+    result = session.execute(select(JobResult).where(JobResult.job_id == job_id)).scalar_one_or_none()
+    if not result:
+        raise HTTPException(404, "no result")
+    return {"payload": result.payload}
 
 @app.post(
     "/jobs",
@@ -208,21 +215,22 @@ def get_result(job_id: int, ctx=Depends(current_ctx)):
     response_model=JobCreated,
     responses={429: {"description": "Limite de jobs concorrentes da empresa atingido"}},
 )
-def create_job(body: NewJob, ctx=Depends(current_ctx)):
+def create_job(body: NewJob, ctx=Depends(current_ctx), session: Session = Depends(get_session)):
     event = current_event().add(company_id=ctx["company_id"], job_kind=body.kind)
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT max_concurrent_jobs FROM companies WHERE id=%s", (ctx["company_id"],))
-        limit = cur.fetchone()[0]
-        cur.execute("SELECT count(*) FROM jobs WHERE company_id=%s AND status IN ('queued','running')", (ctx["company_id"],))
-        running = cur.fetchone()[0]
-        event.add(concurrency_limit=limit, jobs_running=running)
-        if running >= limit:
-            raise HTTPException(429, "limite de jobs concorrentes atingido")
-        cur.execute("INSERT INTO jobs (company_id, kind, status) VALUES (%s,%s,'queued') RETURNING id", (ctx["company_id"], body.kind))
-        conn.commit()
-        job_id = cur.fetchone()[0]
-        event.add(job_id=job_id)
-        return {"id": job_id, "status": "queued"}
+    company = session.get(Company, ctx["company_id"])
+    if not company:
+        raise HTTPException(401, "empresa desconhecida")
+    running = session.execute(
+        select(func.count()).select_from(Job).where(Job.company_id == company.id, Job.status.in_(("queued", "running")))
+    ).scalar_one()
+    event.add(concurrency_limit=company.max_concurrent_jobs, jobs_running=running)
+    if running >= company.max_concurrent_jobs:
+        raise HTTPException(429, "limite de jobs concorrentes atingido")
+    job = Job(company_id=company.id, kind=body.kind, status="queued")
+    session.add(job)
+    session.flush()
+    event.add(job_id=job.id)
+    return {"id": job.id, "status": "queued"}
 
 @app.get(
     "/admin/jobs",
@@ -230,8 +238,7 @@ def create_job(body: NewJob, ctx=Depends(current_ctx)):
     summary="Lista todos os jobs de todas as empresas",
     response_model=list[AdminJob],
 )
-def admin_jobs(ctx=Depends(current_ctx)):
+def admin_jobs(ctx=Depends(current_ctx), session: Session = Depends(get_session)):
     current_event().add(company_id=ctx["company_id"], role=ctx["role"])
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, company_id, status FROM jobs ORDER BY id")
-        return [{"id": r[0], "company_id": r[1], "status": r[2]} for r in cur.fetchall()]
+    jobs = session.execute(select(Job).order_by(Job.id)).scalars().all()
+    return [{"id": j.id, "company_id": j.company_id, "status": j.status} for j in jobs]
