@@ -2,8 +2,8 @@ import time
 
 from sqlalchemy import select
 
-from features.companies.models import Company
-from features.jobs.models import Job, JobResult
+from modules.companies.models import Company
+from modules.jobs.models import Job, JobResult
 from shared.db.engine import session_scope
 from shared.logging.wide_event import WideEvent, start_event
 

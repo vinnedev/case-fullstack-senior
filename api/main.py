@@ -11,8 +11,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from auth import current_ctx
-from features.companies.models import Company
-from features.jobs.models import Job, JobResult
+from modules.companies.models import Company
+from modules.jobs.models import Job, JobResult
 from shared.db.engine import dispose_engine, get_session
 from shared.logging.wide_event import WideEvent, start_event, current_event
 

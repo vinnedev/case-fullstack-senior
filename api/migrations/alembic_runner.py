@@ -7,8 +7,8 @@ from sqlalchemy import engine_from_config, pool
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from features.companies import models as _companies_models  # noqa: F401
-from features.jobs import models as _jobs_models  # noqa: F401
+from modules.companies import models as _companies_models  # noqa: F401
+from modules.jobs import models as _jobs_models  # noqa: F401
 from shared.db.base import Base
 from shared.db.engine import database_url
 

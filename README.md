@@ -65,7 +65,7 @@ Ambos os serviços (api e worker) acessam o Postgres via **SQLAlchemy 2.0** com 
 | `DB_POOL_RECYCLE_S` | 1800 | Recicla conexões antigas |
 
 - `shared/db/engine.py` — engine singleton (`pool_pre_ping` habilitado), `session_scope()` (commit no sucesso, rollback em exceção), dependency `get_session` para o FastAPI e `dispose_engine()` chamado no graceful shutdown.
-- Models por feature (package-by-feature): `features/companies/models.py` (Company, User) e `features/jobs/models.py` (Job, JobResult).
+- Models por feature (package-by-feature): `modules/companies/models.py` (Company, User) e `modules/jobs/models.py` (Job, JobResult).
 - O worker reivindica jobs com `SELECT ... FOR UPDATE SKIP LOCKED` — é seguro rodar múltiplas réplicas sem processar o mesmo job duas vezes.
 
 ### Migrations (Alembic)
@@ -248,11 +248,11 @@ relay/
 ├─ db/
 │  └─ seed.sql                 # Dados de exemplo (via `--profile seed`)
 ├─ api/                        # API FastAPI (dona do schema)
-│  ├─ features/                # Models por feature (jobs, companies)
+│  ├─ modules/                # Models por feature (jobs, companies)
 │  ├─ shared/                  # config (env), db (pool/ORM), logging (wide events)
 │  ├─ migrations/              # Alembic (env.py é shim exigido pelo Alembic; lógica em alembic_runner.py)
 │  └─ tests/                   # Espelha a estrutura do código
-├─ worker/                     # Processador de jobs (mesmo layout shared/features/tests)
+├─ worker/                     # Processador de jobs (mesmo layout shared/modules/tests)
 └─ web/                        # React SPA
 ```
 

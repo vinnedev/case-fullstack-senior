@@ -2,8 +2,8 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from features.companies.models import Company
-from features.jobs.models import Job, JobResult
+from modules.companies.models import Company
+from modules.jobs.models import Job, JobResult
 from shared.db import engine as engine_module
 from shared.db.base import Base
 
