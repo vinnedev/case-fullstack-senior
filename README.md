@@ -250,7 +250,7 @@ relay/
 ├─ api/                        # API FastAPI (dona do schema)
 │  ├─ features/                # Models por feature (jobs, companies)
 │  ├─ shared/                  # config (env), db (pool/ORM), logging (wide events)
-│  ├─ migrations/              # Alembic (env.py é convenção do Alembic)
+│  ├─ migrations/              # Alembic (env.py é shim exigido pelo Alembic; lógica em alembic_runner.py)
 │  └─ tests/                   # Espelha a estrutura do código
 ├─ worker/                     # Processador de jobs (mesmo layout shared/features/tests)
 └─ web/                        # React SPA
