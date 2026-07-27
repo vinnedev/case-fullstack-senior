@@ -28,10 +28,69 @@ docker compose up --build
 ```
 
 Isso sobe:
-- **API** em `http://localhost:8000` (docs OpenAPI em `/docs`)
-- **PostgreSQL** em `localhost:5432`
+- **API** em `http://localhost:8000` (docs OpenAPI em `/docs`) — aplica as migrations (`alembic upgrade head`) antes de iniciar
+- **PostgreSQL** em `localhost:5433` (5432 dentro da rede do compose)
 - **Worker** (background, sem HTTP)
 - **Web** em `http://localhost:5173`
+
+Para popular o banco com os dados de exemplo:
+
+```bash
+docker compose --profile seed run --rm seed
+```
+
+### Rodando localmente (sem Docker)
+
+Cada serviço Python usa [uv](https://docs.astral.sh/uv/) e carrega automaticamente o `.env` da raiz (`shared/config/env.py`); copie `.env.example` para `.env` se necessário.
+
+```bash
+docker compose up -d db                      # Postgres em localhost:5433
+cd api && uv run alembic upgrade head        # aplica migrations
+docker compose --profile seed run --rm seed  # dados de exemplo
+cd api && uv run uvicorn main:app --reload   # API
+cd worker && uv run main.py                  # worker
+```
+
+## Banco de dados: pool, ORM e migrations
+
+### Camada de acesso (`shared/db/`)
+
+Ambos os serviços (api e worker) acessam o Postgres via **SQLAlchemy 2.0** com pool de conexões (`QueuePool`), configurável por variáveis de ambiente:
+
+| Variável | Default | Descrição |
+|---|---|---|
+| `DB_POOL_SIZE` | 5 | Conexões persistentes no pool |
+| `DB_MAX_OVERFLOW` | 10 | Conexões extras sob pico |
+| `DB_POOL_TIMEOUT_S` | 30 | Espera máxima por conexão livre |
+| `DB_POOL_RECYCLE_S` | 1800 | Recicla conexões antigas |
+
+- `shared/db/engine.py` — engine singleton (`pool_pre_ping` habilitado), `session_scope()` (commit no sucesso, rollback em exceção), dependency `get_session` para o FastAPI e `dispose_engine()` chamado no graceful shutdown.
+- Models por feature (package-by-feature): `features/companies/models.py` (Company, User) e `features/jobs/models.py` (Job, JobResult).
+- O worker reivindica jobs com `SELECT ... FOR UPDATE SKIP LOCKED` — é seguro rodar múltiplas réplicas sem processar o mesmo job duas vezes.
+
+### Migrations (Alembic)
+
+A **api é a dona do schema**; as migrations vivem em `api/migrations/` e são a fonte de verdade (não existe mais `db/schema.sql`).
+
+```bash
+cd api
+uv run alembic upgrade head                          # aplica
+uv run alembic revision --autogenerate -m "mudança"  # gera a partir dos models
+uv run alembic downgrade -1                          # desfaz a última
+```
+
+A migration inicial (`0001_initial_schema`) mantém a modelagem original e adiciona apenas índices dirigidos pelas queries reais da aplicação:
+
+| Índice | Query que atende | Custo de manutenção |
+|---|---|---|
+| `ix_jobs_company_created (company_id, created_at)` | `GET /jobs` (lista por empresa ordenada por data) | um índice B-tree padrão |
+| `ix_jobs_queued (id) WHERE status='queued'` | worker: `WHERE status='queued' ORDER BY id LIMIT 1` | parcial — só indexa jobs na fila (quase sempre poucos), escrita e RAM mínimas |
+| `ix_jobs_company_active (company_id) WHERE status IN ('queued','running')` | `POST /jobs` (count do limite de concorrência) | parcial — só jobs ativos |
+| `ix_job_results_job_id (job_id)` | `GET /jobs/{id}/result` e o count de resultados no `GET /jobs` | B-tree padrão |
+
+Lookups por PK (`GET /jobs/{id}`, updates do worker) e o `GET /admin/jobs` (`ORDER BY id`) já são cobertos pela PK. Não há índice em colunas de baixa cardinalidade isoladas (`status`, `kind`, `role`) — seriam varridos quase inteiros e só custariam escrita e memória.
+
+No Docker, o container da api roda `alembic upgrade head` automaticamente antes do uvicorn.
 
 ### Autenticação fake
 
@@ -187,10 +246,13 @@ relay/
 ├─ docker-compose.yml
 ├─ .env.example
 ├─ db/
-│  ├─ schema.sql               # Schema do banco
-│  └─ seed.sql                 # Dados pré-seeded
-├─ api/                        # API FastAPI
-├─ worker/                     # Processador de jobs
+│  └─ seed.sql                 # Dados de exemplo (via `--profile seed`)
+├─ api/                        # API FastAPI (dona do schema)
+│  ├─ features/                # Models por feature (jobs, companies)
+│  ├─ shared/                  # config (env), db (pool/ORM), logging (wide events)
+│  ├─ migrations/              # Alembic (env.py é convenção do Alembic)
+│  └─ tests/                   # Espelha a estrutura do código
+├─ worker/                     # Processador de jobs (mesmo layout shared/features/tests)
 └─ web/                        # React SPA
 ```
 
