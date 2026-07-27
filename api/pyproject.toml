@@ -1,0 +1,15 @@
+[project]
+name = "api"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+
+[tool.fastapi]
+    entrypoint = "main:app"
+
+dependencies = [
+    "fastapi[standard]>=0.140.1",
+    "psycopg>=3.3.4",
+    "uvicorn>=0.51.0",
+]
