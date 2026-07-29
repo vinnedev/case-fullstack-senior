@@ -1,261 +1,172 @@
-# Relay — Serviço de Processamento de Jobs em Background
+# Case Galaxies - Fullstack Senior
 
-## O que é Relay?
+Implementação de um serviço multi-tenant para submissão e processamento assíncrono de jobs. A aplicação combina uma API FastAPI, um worker Python, PostgreSQL como fila durável e uma SPA React para acompanhar o ciclo de vida de cada job.
 
-Relay é um **serviço multi-tenant de processamento de jobs em background**. Empresas (tenants) submetem jobs para processamento assíncrono; um worker processa em background; usuários acompanham o status e baixam resultados — tudo isolado por empresa.
+O resultado cobre isolamento por empresa, criação idempotente, cancelamento cooperativo, retry manual, DLQ, auditoria de eventos e observabilidade provisionada por código.
 
-Este repositório contém uma **base de case deliberadamente imperfeita**. Não é um modelo a seguir em produção — é um ponto de partida educacional desenhado para ser estendido.
+## Material original do case
 
-## Stack
+Os documentos recebidos com o case foram preservados em [`docs/case/`](docs/case/). Eles descrevem a base inicial e devem ser lidos como contexto histórico; a implementação atual está documentada nas seções técnicas abaixo.
 
-| Camada | Tecnologia |
+| Documento | Conteúdo |
 |---|---|
-| **API** | FastAPI (Python 3.12) |
-| **Banco de dados** | PostgreSQL 16 |
-| **Worker** | Processo Python separado |
-| **Frontend** | React 18 + Vite + TanStack Query + shadcn/ui |
-| **Orquestração** | Docker Compose |
+| [README original](docs/case/README.md) | Contexto e requisitos iniciais da base entregue |
+| [TASKS](docs/case/TASKS.md) | Features, regras e checklist de entrega |
+| [KNOWN_ISSUES](docs/case/KNOWN_ISSUES.md) | Sintomas que deveriam ser investigados |
+| [DECISIONS](docs/case/DECISIONS.md) | Registro de decisões, evidências e trade-offs da implementação |
 
-## Como rodar
+## Executar a stack
 
-### Pré-requisitos
-- Docker e Docker Compose recentes (com `docker compose`, não `docker-compose`)
-
-### Start
+**Pré-requisito:** Docker Desktop ou Docker Engine com o plugin `docker compose`.
 
 ```bash
-docker compose up --build
+docker compose up --build -d
+docker compose ps
 ```
 
-Isso sobe:
-- **API** em `http://localhost:8000` (docs OpenAPI em `/docs`) — aplica as migrations (`alembic upgrade head`) antes de iniciar
-- **PostgreSQL** em `localhost:5433` (5432 dentro da rede do compose)
-- **Worker** (background, sem HTTP)
-- **Web** em `http://localhost:5173`
-
-Para popular o banco com os dados de exemplo:
+A API executa as migrations SQL antes de iniciar. Para carregar dados de demonstração:
 
 ```bash
 docker compose --profile seed run --rm seed
 ```
 
-### Rodando localmente (sem Docker)
+Serviços disponíveis:
 
-Cada serviço Python usa [uv](https://docs.astral.sh/uv/) e carrega automaticamente o `.env` da raiz (`shared/config/env.py`); copie `.env.example` para `.env` se necessário.
+| Serviço | Endereço | Uso |
+|---|---|---|
+| Web | http://localhost:5173 | Interface da aplicação |
+| API | http://localhost:8000 | API HTTP |
+| OpenAPI | http://localhost:8000/docs | Contrato interativo da API |
+| PostgreSQL | `localhost:5433` | Banco local (`relay` / `relay`) |
+| Grafana | http://localhost:3000 | Dashboards, login `admin` / `admin` |
+| Prometheus | http://localhost:9090 | Targets, métricas e regras |
+
+Comandos operacionais úteis:
 
 ```bash
-docker compose up -d db                      # Postgres em localhost:5433
-cd api && uv run alembic upgrade head        # aplica migrations
-docker compose --profile seed run --rm seed  # dados de exemplo
-cd api && uv run uvicorn main:app --reload   # API
-cd worker && uv run main.py                  # worker
+# Acompanhar inicialização e processamento
+docker compose logs -f api worker
+
+# Confirmar a saúde da API e os targets de métricas
+curl http://localhost:8000/health
+# Acesse http://localhost:9090/targets no navegador
+
+# Recriar imagens e containers após alterações
+docker compose up --build -d
+
+# Encerrar a stack mantendo os volumes
+docker compose down
+
+# Encerrar e remover dados locais do PostgreSQL e Loki
+docker compose down -v
 ```
 
-## Banco de dados: pool, ORM e migrations
+## Testar
 
-### Camada de acesso (`shared/db/`)
-
-Ambos os serviços (api e worker) acessam o Postgres via **SQLAlchemy 2.0** com pool de conexões (`QueuePool`), configurável por variáveis de ambiente:
-
-| Variável | Default | Descrição |
-|---|---|---|
-| `DB_POOL_SIZE` | 5 | Conexões persistentes no pool |
-| `DB_MAX_OVERFLOW` | 10 | Conexões extras sob pico |
-| `DB_POOL_TIMEOUT_S` | 30 | Espera máxima por conexão livre |
-| `DB_POOL_RECYCLE_S` | 1800 | Recicla conexões antigas |
-
-- `shared/db/engine.py` — engine singleton (`pool_pre_ping` habilitado), `session_scope()` (commit no sucesso, rollback em exceção), dependency `get_session` para o FastAPI e `dispose_engine()` chamado no graceful shutdown.
-- Models por feature (package-by-feature): `modules/companies/models.py` (Company, User) e `modules/jobs/models.py` (Job, JobResult).
-- O worker reivindica jobs com `SELECT ... FOR UPDATE SKIP LOCKED` — é seguro rodar múltiplas réplicas sem processar o mesmo job duas vezes.
-
-### Migrations (Alembic)
-
-A **api é a dona do schema**; as migrations vivem em `api/migrations/` e são a fonte de verdade (não existe mais `db/schema.sql`).
+API e worker usam PostgreSQL efêmero via Testcontainers, portanto Docker precisa estar em execução.
 
 ```bash
-cd api
-uv run alembic upgrade head                          # aplica
-uv run alembic revision --autogenerate -m "mudança"  # gera a partir dos models
-uv run alembic downgrade -1                          # desfaz a última
+(cd api && uv sync --frozen && uv run pytest -q)
+(cd worker && uv sync --frozen && uv run pytest -q)
+(cd web && npm ci && npm test && npm run build)
 ```
 
-A migration inicial (`0001_initial_schema`) mantém a modelagem original e adiciona apenas índices dirigidos pelas queries reais da aplicação:
+Checagens de qualidade Python:
 
-| Índice | Query que atende | Custo de manutenção |
-|---|---|---|
-| `ix_jobs_company_created (company_id, created_at)` | `GET /jobs` (lista por empresa ordenada por data) | um índice B-tree padrão |
-| `ix_jobs_queued (id) WHERE status='queued'` | worker: `WHERE status='queued' ORDER BY id LIMIT 1` | parcial — só indexa jobs na fila (quase sempre poucos), escrita e RAM mínimas |
-| `ix_jobs_company_active (company_id) WHERE status IN ('queued','running')` | `POST /jobs` (count do limite de concorrência) | parcial — só jobs ativos |
-| `ix_job_results_job_id (job_id)` | `GET /jobs/{id}/result` e o count de resultados no `GET /jobs` | B-tree padrão |
-
-Lookups por PK (`GET /jobs/{id}`, updates do worker) e o `GET /admin/jobs` (`ORDER BY id`) já são cobertos pela PK. Não há índice em colunas de baixa cardinalidade isoladas (`status`, `kind`, `role`) — seriam varridos quase inteiros e só custariam escrita e memória.
-
-No Docker, o container da api roda `alembic upgrade head` automaticamente antes do uvicorn.
-
-### Autenticação fake
-
-Relay usa um sistema de autenticação **simplificado** para fins educacionais. Toda requisição HTTP precisa do header `X-Auth` no formato:
-
-```
-X-Auth: <company_id>:<role>
+```bash
+(cd api && uv run ruff check . && uv run ruff format --check .)
+(cd worker && uv run ruff check . && uv run ruff format --check .)
 ```
 
-Exemplos:
-- `X-Auth: 1:user` — usuário comum da empresa 1
-- `X-Auth: 2:admin` — admin da empresa 2
+Cada serviço carrega somente seu próprio arquivo de ambiente local: `api/.env`, `worker/.env` ou `web/.env`. Use o respectivo `.env.example` como ponto de partida. O Compose não depende de `.env` na raiz.
 
-**Não há assinatura nem validação criptográfica — é só um contexto.** Na web UI, existe um dropdown para trocar entre 4 usuários fake:
-- Empresa 1 (Acme): `user@acme.test` (user), `admin@acme.test` (admin)
-- Empresa 2 (Globex): `user@globex.test` (user), `admin@globex.test` (admin)
+## Como funciona
 
-## Dados seeded
+1. A web chama a API com um contexto de empresa simplificado no header `X-Auth`.
+2. A API valida a requisição, persiste o job e o evento de auditoria na mesma transação.
+3. Após o commit, a API publica um `pg_notify` para reduzir a latência de despertar do worker.
+4. O worker reivindica jobs com `FOR UPDATE SKIP LOCKED`, processa fora do lock e finaliza de forma condicional.
+5. A tabela `jobs` é a fila durável. `LISTEN/NOTIFY` é somente um wake-up; o polling de 30 segundos e o `drain()` no startup recuperam notificações perdidas ou backlog.
 
-Duas empresas estão pré-criadas:
+### System design
 
-| ID | Nome | Max concorrentes | Cota inicial |
-|---|---|---|---|
-| 1 | Acme | 2 | 20 |
-| 2 | Globex | 2 | 100 |
+```mermaid
+flowchart TB
+    User["Usuário"] --> Web["Web\nReact + Vite\n:5173"]
+    Web -->|"HTTP + X-Auth\nIdempotency-Key"| API["API\nFastAPI\n:8000"]
 
-Cada empresa tem um usuário comum e um admin. ~30 jobs distribuídos entre os dois tenants em vários status (done, failed, running) para você explorar.
+    subgraph Core["Processamento transacional"]
+        API -->|"SQL via pool psycopg"| DB[("PostgreSQL 16\nJobs, resultados, auditoria, DLQ")]
+        API -. "pg_notify(jobs_queued)\napós commit" .-> Listener["LISTEN jobs_queued\ntimeout 30s"]
+        Listener -->|"acorda ou faz fallback"| Worker["Worker\nPython"]
+        Worker -->|"claim: FOR UPDATE SKIP LOCKED\nlease + worker_id"| DB
+        Worker -->|"finalize/failure\nUPDATE condicional"| DB
+    end
 
-## Endpoints principais
-
-### Listagem de jobs
-
-```
-GET /jobs
-```
-
-Retorna todos os jobs da empresa do usuário autenticado, ordenados por `created_at` DESC.
-
-**Resposta:**
-```json
-[
-  {
-    "id": 1,
-    "kind": "report",
-    "status": "done",
-    "created_at": "2026-07-20T12:34:56.000Z",
-    "result_count": 1
-  }
-]
-```
-
-**Status de job:** `queued` | `running` | `done` | `failed`
-
-### Detalhe de um job
-
-```
-GET /jobs/{job_id}
+    subgraph Observability["Observabilidade"]
+        API -->|"/metrics"| Prometheus["Prometheus"]
+        Worker -->|":9100/metrics"| Prometheus
+        DB --> PgExporter["postgres-exporter"]
+        PgExporter --> Prometheus
+        Docker["Containers Docker"] --> Promtail["Promtail"]
+        API -->|"stdout JSON"| Docker
+        Worker -->|"stdout JSON"| Docker
+        Promtail --> Loki["Loki"]
+        CAdvisor["cAdvisor"] --> Prometheus
+        Prometheus --> Grafana["Grafana"]
+        Loki --> Grafana
+        Blackbox["Blackbox exporter"] -->|"probes HTTP"| API
+        Blackbox -->|"probes HTTP"| Web
+        Blackbox --> Prometheus
+    end
 ```
 
-**Resposta:**
-```json
-{
-  "id": 1,
-  "company_id": 1,
-  "kind": "report",
-  "status": "done"
-}
+### Garantias principais
+
+| Área | Decisão |
+|---|---|
+| Durabilidade | `jobs` permanece no PostgreSQL até sua transição final; notificações não carregam estado de negócio. |
+| Concorrência | Vários workers podem consumir a fila com `SKIP LOCKED`, sem reivindicar a mesma linha. |
+| Recuperação | Jobs `running` com lease vencida são recuperados; worker reiniciado drena o backlog antes de esperar notificações. |
+| Idempotência | `Idempotency-Key` evita duplicação na criação; resultado e débito de quota são protegidos contra repetição. |
+| Isolamento | Leitura e mutação de jobs são filtradas por `company_id`; recursos de outro tenant não expõem existência. |
+| Auditoria | Eventos de submissão, cancelamento, retry, conclusão e falha são persistidos com ator e `trace_id`; o worker usa `system:worker`. |
+
+### Ciclo de vida do job
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued : POST /jobs
+    queued --> running : worker claim
+    queued --> cancelled : POST /cancel
+    running --> done : finalize + resultado
+    running --> cancelled : cancelamento cooperativo
+    running --> failed : falha de processamento
+    failed --> queued : POST /retry\n(attempts < 3)
+    failed --> failed : limite atingido + DLQ
+    done --> [*]
+    cancelled --> [*]
 ```
 
-### Baixar resultado de um job
+## Contratos e documentação técnica
 
+| Área | Documento |
+|---|---|
+| API, autenticação e endpoints | [docs/api.md](docs/api.md) |
+| Worker, concorrência, leases e retry | [docs/worker.md](docs/worker.md) |
+| Frontend e fluxos de UI | [docs/web.md](docs/web.md) |
+| Métricas, logs, dashboards e alertas | [observability/README.md](observability/README.md) |
+| Índice da documentação técnica | [docs/README.md](docs/README.md) |
+| Guia local da API | [api/README.md](api/README.md) |
+| Guia local do worker | [worker/README.md](worker/README.md) |
+| Guia local do frontend | [web/README.md](web/README.md) |
+
+## Estrutura
+
+```text
+api/             API FastAPI e runner de migrations
+worker/          Consumidor assíncrono da fila
+web/             SPA React
+db/migrations/   Schema SQL versionado, aplicado exclusivamente pela API
+observability/   Prometheus, Grafana, Loki, exporters e dashboards
 ```
-GET /jobs/{job_id}/result
-```
-
-**Resposta:**
-```json
-{
-  "payload": "resultado sensível da empresa 1"
-}
-```
-
-### Submeter novo job
-
-```
-POST /jobs
-```
-
-**Body:**
-```json
-{
-  "kind": "report"
-}
-```
-
-**Resposta:**
-```json
-{
-  "id": 42,
-  "status": "queued"
-}
-```
-
-### Admin: ver todos os jobs
-
-```
-GET /admin/jobs
-```
-
-Endpoint administrativo: retorna jobs de todas as empresas.
-
-**Resposta:**
-```json
-[
-  {
-    "id": 1,
-    "company_id": 1,
-    "status": "done"
-  },
-  {
-    "id": 2,
-    "company_id": 2,
-    "status": "running"
-  }
-]
-```
-
-## O que precisa ser feito
-
-Veja o arquivo `TASKS.md` para o enunciado completo do case. Em resumo:
-
-1. **Feature A:** Implementar cancelamento de jobs em processamento.
-2. **Feature B:** Implementar retry de jobs com idempotência (não duplicar resultado, não cobrar quota em dobro).
-3. **Diagnosticar e corrigir** os problemas listados em `KNOWN_ISSUES.md`.
-4. **`DECISIONS.md`:** Documentar achados, correções e trade-offs.
-
-## Problemas conhecidos
-
-Veja `KNOWN_ISSUES.md` para uma lista de sintomas operacionais reportados.
-
-## Segurança
-
-**Importante:** Reporte e corrija **qualquer problema de segurança ou corretude que encontrar, mesmo os não listados em KNOWN_ISSUES.md.** A base é intencionalmente imperfeita — faz parte do case encontrar e corrigir todos os problemas.
-
-## Estrutura do repositório
-
-```
-relay/
-├─ README.md                    # Este arquivo
-├─ TASKS.md                     # Enunciado: features, correções, extras
-├─ KNOWN_ISSUES.md             # Sintomas reportados
-├─ DECISIONS.md                # (stub) A preencher pelo candidato
-├─ docker-compose.yml
-├─ .env.example
-├─ db/
-│  └─ seed.sql                 # Dados de exemplo (via `--profile seed`)
-├─ api/                        # API FastAPI (dona do schema)
-│  ├─ modules/                # Models por feature (jobs, companies)
-│  ├─ shared/                  # config (env), db (pool/ORM), logging (wide events)
-│  ├─ migrations/              # Alembic (env.py é shim exigido pelo Alembic; lógica em alembic_runner.py)
-│  └─ tests/                   # Espelha a estrutura do código
-├─ worker/                     # Processador de jobs (mesmo layout shared/modules/tests)
-└─ web/                        # React SPA
-```
-
-## Perguntas?
-
-Este case é auto-contido. Qualquer informação que você precisar está nestes arquivos ou é deduzível rodando o stack.
