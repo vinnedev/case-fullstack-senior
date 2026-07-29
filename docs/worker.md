@@ -7,10 +7,31 @@ com o Postgres. Mesmo layout modular da API (`modules/`, `shared/` espelhados).
 
 ```mermaid
 flowchart TD
-    S[startup] --> D[drain: processa backlog]
-    D --> L{LISTEN jobs_queued\ntimeout 30s}
-    L -->|NOTIFY| D
-    L -->|timeout fallback| D
+    S(["▶️ startup"]):::infra --> D["drain(): processa todo o backlog\nantes de esperar notificações"]:::worker
+    D --> L{"📡 LISTEN jobs_queued\ntimeout 30s"}:::workerSoft
+    L -->|"NOTIFY\n(latência de ms)"| RC
+    L -->|"timeout\n(fallback p/ notify perdido)"| RC
+
+    RC["recover_stale_jobs()\nlease vencida há 30s → failed\n3ª tentativa órfã → DLQ"]:::failed --> C{"claim\nSELECT ... WHERE status='queued'\nFOR UPDATE SKIP LOCKED"}:::worker
+    C -->|"fila vazia"| L
+    C -->|"job reivindicado\nrunning · attempts+1\nlease + worker_id"| E["executa o handler\nfora de qualquer lock\ntoken de cancel + heartbeat"]:::running
+
+    E -->|"sucesso"| F["finalize\nUPDATE WHERE status='running'\nresultado ON CONFLICT DO NOTHING\nquota + auditoria na mesma tx"]:::done
+    E -->|"exceção"| X["failure\nlast_error + failed em tx própria\n3ª falha grava DLQ junto"]:::failed2
+    E -->|"JobCancelledError"| K["cancelado no meio\nrollback · limpa lease\nresultado descartado, quota intacta"]:::cancelled
+
+    F --> C
+    X --> C
+    K --> C
+
+    classDef infra fill:#334155,stroke:#1E293B,color:#FFFFFF
+    classDef worker fill:#7C3AED,stroke:#5B21B6,color:#FFFFFF
+    classDef workerSoft fill:#F3EDFF,stroke:#7C3AED,color:#3B1D75
+    classDef running fill:#FEF3C7,stroke:#D97706,color:#7C2D12
+    classDef done fill:#DCFCE7,stroke:#16A34A,color:#14532D
+    classDef failed fill:#FEE2E2,stroke:#DC2626,color:#7F1D1D
+    classDef failed2 fill:#FEE2E2,stroke:#DC2626,color:#7F1D1D
+    classDef cancelled fill:#E5E7EB,stroke:#6B7280,color:#1F2937
 ```
 
 O LISTEN/NOTIFY vive em `modules/jobs/listener.py`: o `pg_notify` emitido pela
@@ -22,7 +43,10 @@ se um notify se perder (LISTEN/NOTIFY não tem entrega garantida sem listener).
 
 1. **Claim** (transação própria): `SELECT ... WHERE status='queued' ORDER BY id
    LIMIT 1 FOR UPDATE SKIP LOCKED` → `UPDATE SET running, attempts+1` → commit.
-   `SKIP LOCKED` permite N réplicas sem processar o mesmo job duas vezes.
+   `SKIP LOCKED` permite N réplicas sem processar o mesmo job duas vezes
+   (`docker compose up -d --scale worker=N`; validado no
+   [benchmark](../benchmark/README.md): a 3 jobs/s, 1 réplica satura e 4
+   seguram e2e p95 em 1,5s).
 2. **Trabalho** fora de qualquer lock (não bloqueia cancel).
 3. **Finalize** (transação própria): `UPDATE ... SET done WHERE status='running'`.
    - 0 linhas → o job foi **cancelado no meio**: resultado descartado, quota intacta.

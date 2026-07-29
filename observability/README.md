@@ -8,35 +8,49 @@ manualmente: datasources e dashboards já nascem prontos.
 
 ```mermaid
 flowchart LR
-    subgraph Serviços
-        A["API :8000\n/metrics"]
-        K["Worker\n:9100 /metrics"]
-        W["Web :5173"]
-        P[("Postgres")]
-    end
-    subgraph Coleta
-        PR["Prometheus :9090\n(métricas, 10s)"]
-        PT["Promtail\n(logs dos containers)"]
-        PE["postgres-exporter"]
-        CA["cAdvisor\ncontainers"]
-        BB["blackbox-exporter\n(sondas HTTP)"]
-    end
-    subgraph Armazenamento/Visualização
-        L["Loki :3100\n(logs, retenção 7d)"]
-        G["Grafana :3000\n(dashboards provisionados)"]
+    subgraph Servicos["📦 Serviços instrumentados"]
+        direction TB
+        A["⚙️ API :8000\n/metrics + wide events"]:::api
+        K["🔁 Worker :9100\nmétricas de fluxo\n(réplicas via DNS discovery)"]:::worker
+        W["🖥️ Web :5173\nsem métricas próprias\n(sondado de fora)"]:::web
+        P[("🗄️ Postgres\nfonte de verdade\ndo estado da fila")]:::db
     end
 
-    A --> PR
-    K --> PR
-    PE --> PR
-    CA --> PR
-    BB --> PR
-    P --> PE
-    BB -.probe.-> W
-    BB -.probe.-> A
-    PT --> L
-    PR --> G
-    L --> G
+    subgraph Coleta["📡 Coleta"]
+        direction TB
+        PR["Prometheus :9090\nscrape 10s · recording rules\nSLOs e alertas como código"]:::obs
+        PE["postgres-exporter\npg_jobs_total (5 status, com zeros)\npg_dlq_total · pg_stat_statements"]:::obs
+        CA["cAdvisor\nCPU · RAM · rede · disco\npor container"]:::obs
+        BB["blackbox-exporter\ndisponibilidade vista de fora\ncomo um usuário veria"]:::obs
+        PT["Promtail\ndescobre containers via Docker\nextrai level/event dos wide events"]:::obs
+    end
+
+    subgraph Visual["📊 Armazenamento e visualização"]
+        direction TB
+        L["Loki :3100\nlogs · retenção 7d"]:::obs
+        G["Grafana :3000\n9 dashboards provisionados\ndefault: últimos 5 minutos"]:::grafana
+    end
+
+    A ==>|"/metrics/"| PR
+    K ==>|":9100"| PR
+    P --> PE ==> PR
+    CA ==> PR
+    BB ==> PR
+    BB -.->|"probe HTTP"| W
+    BB -.->|"probe HTTP"| A
+    A & K -->|"stdout JSON"| PT ==> L
+    PR ==> G
+    L ==> G
+
+    classDef api fill:#0065FF,stroke:#0047B3,color:#FFFFFF
+    classDef worker fill:#7C3AED,stroke:#5B21B6,color:#FFFFFF
+    classDef web fill:#E8F1FF,stroke:#0065FF,color:#0B2A5B
+    classDef db fill:#0F766E,stroke:#115E59,color:#FFFFFF
+    classDef obs fill:#FFF7E6,stroke:#F59E0B,color:#7C2D12
+    classDef grafana fill:#F59E0B,stroke:#B45309,color:#FFFFFF
+    style Servicos fill:#F6F9FF,stroke:#0065FF,color:#0B2A5B
+    style Coleta fill:#FFFBF2,stroke:#F59E0B,color:#7C2D12
+    style Visual fill:#FFF7E6,stroke:#B45309,color:#7C2D12
 ```
 
 ## Acessos
@@ -70,7 +84,8 @@ flowchart LR
 - `job_processing_duration_seconds` — histograma por `outcome`
   (`done`/`cancelled`/`failed`), com percentis no dashboard.
 - `jobs_processed_total` — contador por outcome (taxa de falha derivada).
-- Estado da fila (`pg_jobs_total{status}`) vem do **postgres-exporter** via query custom — verdade no momento do scrape, independente do loop do worker.
+- Estado da fila (`pg_jobs_total{status}`) vem do **postgres-exporter** via query custom — verdade no momento do scrape, independente do loop do worker. A query emite os 5 status sempre, com valor 0 incluído (sem isso, fila vazia viraria "No data" no painel em vez de 0).
+- O scrape do worker usa **DNS discovery** (`dns_sd_configs`): com `docker compose up -d --scale worker=N`, cada réplica entra como target automaticamente.
 - DLQ: `pg_dlq_total` e `pg_dlq_seconds_since_last` (exporter) + tabela completa no dashboard **DLQ**.
 - `worker_wakeups_total{reason}` — NOTIFY vs timeout (saúde do pub/sub).
 
@@ -103,9 +118,10 @@ acessa `web:5173` e `api:8000/docs` de fora, como um usuário faria, e reporta
 
 ## Logs (Loki + Promtail)
 
-> **Ruído de scrape:** com `LOG_SUPPRESS_PROBE_ROUTES=true` (configurável pelo
-> `api/.env` em execução local ou variável exportada para o Compose), as
-> requests de `/metrics` e das rotas de health somem do
+> **Ruído de scrape:** com `LOG_SUPPRESS_PROBE_ROUTES=true` (**ligado por
+> padrão no Compose**; desligue exportando a variável como `false`), as
+> requests de `/metrics`, das rotas de health e de `/docs`/`/openapi.json`/
+> `/favicon.png` (sondadas pelo blackbox a cada scrape) somem do
 > stream quando respondem OK. São **dois canais** e a flag governa os dois: o
 > wide event JSON (filtrado no middleware) e o access log em texto do uvicorn
 > (filtrado no logger `uvicorn.access` — sem isso, linhas como
@@ -122,17 +138,22 @@ com o job pelo `trace_id` presente em cada linha.
 
 ## Dashboards provisionados (pasta Relay)
 
+Todos os dashboards abrem com janela padrão de **últimos 5 minutos**. API,
+Worker e Database têm uma linha "Recursos do container" (CPU, memória
+residente, rede e disco via cAdvisor) para correlacionar sintoma de aplicação
+com consumo de máquina sem trocar de dashboard.
+
 | Dashboard | Conteúdo |
 |---|---|
 | **Overview** | Visão única: stats no topo (health check, RPS, p99, fila, jobs/s, conexões) + seções API, Worker, Database e Logs |
-| **API** | p50/p75/p99 por rota, RPS por rota+status, taxa de 5xx, in-flight, jobs criados/s |
-| **Worker** | espera na fila e processamento (p50/p99), throughput por outcome, taxa de falha, backlog, jobs por status, wakeups NOTIFY vs timeout |
-| **Database** | conexões, utilização, locks, deadlocks, cache hit, tamanho + health checks externos (web/api) |
+| **API** | p50/p75/p99 por rota, RPS por rota+status, taxa de 5xx, in-flight, jobs criados/s + recursos do container |
+| **Worker** | espera na fila e processamento (p50/p99), throughput por outcome, taxa de falha, backlog, jobs por status, wakeups NOTIFY vs timeout + recursos do container |
+| **Database** | conexões, utilização, locks, deadlocks, cache hit, tamanho, health checks externos, **estado atual** (stats: conexões, tamanho, cache hit, locks, fila) + recursos do container |
 | **Logs** | stream de wide events (api+worker) e taxa de eventos de erro por serviço |
 | **DLQ** | Dead Letter Queue auditável: contagem, recência e tabela completa (`dead_letter_jobs`) via datasource Postgres read-only |
-| **Performance Investigation** | Pool da API, top queries por tempo, queries lentas via `pg_stat_statements` e bloqueios ativos |
+| **Performance Investigation** | Pool da API, top queries por tempo, queries lentas via `pg_stat_statements`, stat "queries bloqueadas agora" (a tabela de bloqueios vazia mostra "No data", que aqui significa zero) |
 | **Resources** | CPU, memória e rede por container via cAdvisor |
-| **SLOs & Alerts** | Disponibilidade, latência abaixo de 1s, sucesso do worker e alertas ativos |
+| **SLOs & Alerts** | Disponibilidade, latência abaixo de 1s, sucesso do worker e alertas ativos — os ratios respondem 100% em janela sem tráfego (guarda contra 0/0 = NaN) |
 
 ## Alertas e Notificações
 

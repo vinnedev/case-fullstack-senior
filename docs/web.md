@@ -46,15 +46,25 @@ toasts ancorados na base em telas pequenas.
 
 ```mermaid
 sequenceDiagram
-    participant U as Usuário
-    participant L as JobsPanel
-    participant A as API
+    autonumber
+    box rgb(241, 245, 249) Navegador
+        participant U as 👤 Usuário
+        participant L as 🖥️ JobsPanel
+        participant Q as 🗂️ TanStack Query
+    end
+    box rgb(232, 241, 255) Backend
+        participant A as ⚙️ API
+    end
 
-    U->>L: clique "cancelar" (visível se queued/running)
-    L->>A: POST /jobs/{id}/cancel (X-Auth)
-    A-->>L: 200 cancelled | 409
-    L->>L: invalidateQueries → refetch
-    Note over L: polling condicional: 1s só com job ativo,\ndesligado em repouso
+    U->>L: clique "Cancelar"<br/>(botão visível só em queued/running)
+    L->>+A: POST /jobs/{id}/cancel<br/>(X-Auth do usuário selecionado)
+    A-->>-L: 200 cancelled — ou 409 se o worker finalizou antes
+    L->>Q: invalidateQueries
+    Q->>+A: GET /jobs (refetch)
+    A-->>-Q: lista atualizada + X-Total-Count
+    Q-->>L: re-render com badge "cancelled"
+    Note over L,Q: toast de sucesso, ou de erro com o detail real da API
+    Note over Q: polling condicional: 1s só com job ativo,<br/>desligado em repouso (focus-refetch cobre o resto)
 ```
 
 - **Autenticação fake**: o dropdown troca o header `X-Auth` (`1:user`,

@@ -10,6 +10,7 @@ status e resultado pela web.
 | [worker.md](worker.md) | Ciclo de processamento, concorrência, retry e pub/sub |
 | [web.md](web.md) | SPA React: estrutura, fluxos e integração com a API |
 | [observability/README.md](../observability/README.md) | Métricas, logs e dashboards (Grafana, Prometheus, Loki) |
+| [benchmark/README.md](../benchmark/README.md) | Carga com k6: cenários, resultados e análise de gargalo |
 
 O [README raiz](../README.md) é o ponto de entrada operacional. O registro de
 decisões, evidências e trade-offs está em
@@ -20,21 +21,29 @@ preservam o enunciado original.
 
 ```mermaid
 flowchart LR
-    subgraph Cliente
-        W["Web (React + Vite)\n:5173"]
+    subgraph Cliente["🖥️ Cliente"]
+        W["Web — React + Vite&nbsp;&nbsp;:5173\npolling adaptativo\nIdempotency-Key por intenção"]:::web
     end
-    subgraph Backend
-        A["API (FastAPI)\n:8000"]
-        K["Worker (Python)"]
+    subgraph Backend["⚙️ Backend"]
+        A["API — FastAPI&nbsp;&nbsp;:8000\nvalidação na borda · wide events\ncommit antes da resposta"]:::api
+        K["Worker Python — réplicas 1..N\nlease 30s · cancel cooperativo\nDLQ na 3ª falha"]:::worker
     end
-    subgraph Dados
-        P[("PostgreSQL 16\njobs = fila durável")]
+    subgraph Dados["🗄️ Dados"]
+        P[("PostgreSQL 16\njobs = fila durável\nresultados · auditoria · DLQ")]:::db
     end
 
-    W -- "HTTP + X-Auth" --> A
-    A -- "SQL (pool psycopg)\npg_notify('jobs_queued')" --> P
-    P -. "LISTEN jobs_queued\n(wake-up)" .-> K
-    K -- "FOR UPDATE SKIP LOCKED\nclaim / finalize" --> P
+    W ==>|"HTTP · X-Auth (tenant:role)"| A
+    A ==>|"SQL parametrizado (pool psycopg)\npg_notify('jobs_queued') no commit"| P
+    P -. "LISTEN jobs_queued\nwake-up (fallback: polling 30s)" .-> K
+    K ==>|"claim: FOR UPDATE SKIP LOCKED\nfinalize: UPDATE condicional"| P
+
+    classDef web fill:#E8F1FF,stroke:#0065FF,color:#0B2A5B
+    classDef api fill:#0065FF,stroke:#0047B3,color:#FFFFFF
+    classDef worker fill:#7C3AED,stroke:#5B21B6,color:#FFFFFF
+    classDef db fill:#0F766E,stroke:#115E59,color:#FFFFFF
+    style Cliente fill:#F1F5F9,stroke:#64748B,color:#0F172A
+    style Backend fill:#F6F9FF,stroke:#0065FF,color:#0B2A5B
+    style Dados fill:#F0FDFA,stroke:#0F766E,color:#134E4A
 ```
 
 Pontos estruturais:
@@ -52,16 +61,36 @@ Pontos estruturais:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> queued : POST /jobs
-    queued --> running : worker claim
-    queued --> cancelled : POST /cancel
-    running --> done : finalize (resultado + quota)
-    running --> cancelled : POST /cancel
-    running --> failed : falha + last_error
-    failed --> queued : POST /retry (attempts < 3, backoff 5s/10s)
-    failed --> failed : attempts >= 3 + registro na DLQ
+    [*] --> queued : POST /jobs (201)\nIdempotency-Key + limite de concorrência
+
+    queued --> running : worker claim\nSKIP LOCKED · attempts + 1
+    queued --> cancelled : POST /cancel (200)
+
+    running --> done : finalize\nresultado + quota na mesma tx
+    running --> cancelled : POST /cancel\n(token cooperativo interrompe)
+    running --> failed : falha + last_error\nou lease vencida
+
+    failed --> queued : POST /retry (200)\nattempts < 3 · backoff 5s/10s
+    failed --> [*] : attempts >= 3\nregistro imutável na DLQ
+
     done --> [*]
     cancelled --> [*]
+
+    note right of done
+        [*] encerra as transições, não é o banco:
+        a linha permanece na tabela jobs.
+    end note
+
+    classDef sQueued fill:#E8F1FF,stroke:#0065FF,color:#0B2A5B
+    classDef sRunning fill:#FEF3C7,stroke:#D97706,color:#7C2D12
+    classDef sDone fill:#DCFCE7,stroke:#16A34A,color:#14532D
+    classDef sFailed fill:#FEE2E2,stroke:#DC2626,color:#7F1D1D
+    classDef sCancelled fill:#E5E7EB,stroke:#6B7280,color:#1F2937
+    class queued sQueued
+    class running sRunning
+    class done sDone
+    class failed sFailed
+    class cancelled sCancelled
 ```
 
 O worker não reprocessa automaticamente uma falha. A primeira e a segunda falha
@@ -74,20 +103,30 @@ recebe uma entrada na DLQ.
 
 ```mermaid
 sequenceDiagram
-    participant U as Usuário
-    participant A as API
-    participant P as Postgres
-    participant K as Worker
+    autonumber
+    box rgb(241, 245, 249) Cliente
+        participant U as 👤 Usuário
+    end
+    box rgb(232, 241, 255) Backend
+        participant A as ⚙️ API
+    end
+    box rgb(240, 253, 250) Dados
+        participant P as 🗄️ Postgres
+    end
+    box rgb(243, 237, 255) Processamento
+        participant K as 🔁 Worker
+    end
 
-    K->>P: claim: UPDATE jobs SET running (tx própria, commit)
-    Note over K: processa (fora de lock)
-    U->>A: POST /jobs/{id}/cancel
-    A->>P: UPDATE ... SET cancelled WHERE status IN (queued, running)
-    P-->>A: 1 linha → 200 cancelled
-    K->>P: finalize: UPDATE ... SET done WHERE status = 'running'
-    P-->>K: 0 linhas → cancelado no meio
-    Note over K: token de cancelamento interrompe o handler
-    Note over K: rollback da transação, limpa lease, não debita quota
+    K->>+P: claim: UPDATE jobs SET running (tx própria, commit)
+    P-->>-K: linha reivindicada (lease + worker_id)
+    Note over K: processa fora de qualquer lock<br/>(watcher em conexão separada observa o status)
+    U->>+A: POST /jobs/{id}/cancel
+    A->>+P: UPDATE ... SET cancelled WHERE status IN (queued, running)
+    P-->>-A: 1 linha atualizada
+    A-->>-U: 200 { status: cancelled }
+    K->>+P: finalize: UPDATE ... SET done WHERE status = 'running'
+    P-->>-K: 0 linhas — cancelado no meio
+    Note over K: token de cancelamento interrompe o handler<br/>rollback da transação · limpa a lease · quota intacta
 ```
 
 Se a ordem inverte (finalize primeiro), o cancel não casa linha e responde 409.
@@ -102,6 +141,10 @@ disponível para os próximos jobs.
 ## Modelo de dados
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {
+    'primaryColor': '#E8F1FF', 'primaryBorderColor': '#0065FF',
+    'primaryTextColor': '#0B2A5B', 'lineColor': '#64748B',
+    'tertiaryColor': '#F0FDFA', 'fontSize': '13px'}}}%%
 erDiagram
     companies ||--o{ users : possui
     companies ||--o{ jobs : submete

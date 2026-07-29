@@ -28,9 +28,16 @@ Camadas: **route** (HTTP: validação Pydantic, tradução erro de domínio → 
 
 ```mermaid
 flowchart LR
-    R[routes] -->|"erros de domínio → 4xx"| S[service]
-    S -->|"SQL parametrizado"| DB[(Postgres)]
-    M[middleware] -->|"wide event + graceful shutdown"| R
+    REQ(["HTTP request"]):::user --> M["middleware\nwide event por request\ngraceful shutdown (503 + drain)\nmétricas por rota"]:::infra
+    M --> AUTH["AuthContext\nX-Auth → company_id + role\nmalformado → 401 (fail-closed)"]:::api
+    AUTH --> R["routes\nvalidação Pydantic na borda\nerros de domínio → 4xx"]:::api
+    R --> S["service\nregra de negócio + SQL cru\nsem nada de FastAPI\ncommit antes da resposta"]:::api
+    S ==>|"SQL parametrizado\npool psycopg"| DB[("Postgres\nlocks de linha · ON CONFLICT\nUPDATEs condicionais")]:::db
+
+    classDef user fill:#1E293B,stroke:#0F172A,color:#FFFFFF
+    classDef infra fill:#334155,stroke:#1E293B,color:#FFFFFF
+    classDef api fill:#0065FF,stroke:#0047B3,color:#FFFFFF
+    classDef db fill:#0F766E,stroke:#115E59,color:#FFFFFF
 ```
 
 ## Autenticação
@@ -91,8 +98,10 @@ Campos `nullable` (`last_error`, `trace_id`, `job_id`, `job_created_at`) são
 **sempre presentes** na resposta — o que varia é o valor ser `null`, e o
 schema reflete isso (`required` + `anyOf: [tipo, null]`), para clientes
 gerados não tratarem a chave como ausente. `status` nunca é string livre: nas
-leituras é o enum dos 5 estados, nas mutações é o único valor possível
-(`const`). O header `X-Total-Count` está documentado nas três rotas paginadas.
+leituras e no create é o enum dos 5 estados (o replay de `Idempotency-Key`
+devolve o job original, que pode já ter sido processado); em cancel e retry é
+o único valor possível (`const`).
+O header `X-Total-Count` está documentado nas três rotas paginadas.
 Testes de contrato (`TestR12OpenApiContract`) falham se algo disso regredir.
 
 Os eventos de auditoria retornados no detalhe são `submitted`, `cancelled`,
@@ -127,7 +136,7 @@ byte-a-byte de `web/public/galaxies-icon.png` (há teste comparando os bytes).
 | `CORS_ORIGINS` | `http://localhost:5173` | Allowlist de origens (separadas por vírgula) |
 | `LOG_SLOW_THRESHOLD_MS` | 1000 | Acima disso, sempre loga |
 | `LOG_SUCCESS_SAMPLE_RATE` | 1.0 | Amostragem de sucessos |
-| `LOG_SUPPRESS_PROBE_ROUTES` | false | Não emite wide events de `/metrics` e probes de health/readiness/liveness |
+| `LOG_SUPPRESS_PROBE_ROUTES` | false (o Compose liga por padrão) | Não emite logs de sucesso de `/metrics`, probes de health/readiness/liveness, `/docs`, `/openapi.json` e `/favicon.png` |
 | `MIGRATIONS_DIR` | `../db/migrations` | Diretório das migrations |
 
 Validadas no boot por `shared/config/settings.py` (falha cedo com erro claro).

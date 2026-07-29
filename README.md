@@ -97,33 +97,43 @@ O CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) roda em cada push/
 
 ```mermaid
 flowchart TB
-    User["Usuário"] --> Web["Web\nReact + Vite\n:5173"]
-    Web -->|"HTTP + X-Auth\nIdempotency-Key"| API["API\nFastAPI\n:8000"]
+    User(["👤 Usuário"]):::user --> Web["🖥️ Web — SPA React + Vite&nbsp;&nbsp;:5173\npolling adaptativo (1s só com job ativo)\nIdempotency-Key gerada por intenção"]:::web
+    Web ==>|"HTTP · X-Auth (tenant:role)\nIdempotency-Key no create"| API["⚙️ API — FastAPI&nbsp;&nbsp;:8000\nstateless · validação Pydantic na borda\nwide events + graceful shutdown"]:::api
 
-    subgraph Core["Processamento transacional"]
-        API -->|"SQL via pool psycopg"| DB[("PostgreSQL 16\nJobs, resultados, auditoria, DLQ")]
-        API -. "pg_notify(jobs_queued)\napós commit" .-> Listener["LISTEN jobs_queued\ntimeout 30s"]
-        Listener -->|"acorda ou faz fallback"| Worker["Worker\nPython"]
-        Worker -->|"claim: FOR UPDATE SKIP LOCKED\nlease + worker_id"| DB
-        Worker -->|"finalize/failure\nUPDATE condicional"| DB
+    subgraph Core["🔒 Núcleo transacional — o Postgres arbitra as corridas"]
+        direction TB
+        API ==>|"SQL parametrizado\npool psycopg · commit antes da resposta"| DB[("🗄️ PostgreSQL 16\njobs = fila durável · job_results\njob_audit_events · dead_letter_jobs")]:::db
+        API -. "pg_notify('jobs_queued')\nentregue no commit" .-> Listener["📡 LISTEN jobs_queued\nfallback: polling 30s\n+ drain() no startup"]:::workerSoft
+        Listener --> Worker["🔁 Worker Python — réplicas 1..N\nclaim → executa → finaliza\nlease 30s · token cooperativo de cancel"]:::worker
+        Worker ==>|"claim: FOR UPDATE SKIP LOCKED\nlease + worker_id"| DB
+        Worker ==>|"finalize/failure: UPDATE condicional\nresultado + quota + auditoria na mesma tx"| DB
     end
 
-    subgraph Observability["Observabilidade"]
-        API -->|"/metrics"| Prometheus["Prometheus"]
-        Worker -->|":9100/metrics"| Prometheus
-        DB --> PgExporter["postgres-exporter"]
-        PgExporter --> Prometheus
-        Docker["Containers Docker"] --> Promtail["Promtail"]
-        API -->|"stdout JSON"| Docker
-        Worker -->|"stdout JSON"| Docker
-        Promtail --> Loki["Loki"]
-        CAdvisor["cAdvisor"] --> Prometheus
-        Prometheus --> Grafana["Grafana"]
+    subgraph Observability["🔭 Observabilidade — provisionada por código"]
+        direction TB
+        API -->|"/metrics"| Prometheus["Prometheus\nscrape 10s · SLOs e alertas como código"]:::obs
+        Worker -->|":9100/metrics\n(réplicas via DNS discovery)"| Prometheus
+        DB --> PgExporter["postgres-exporter\npg_jobs_total · pg_dlq_total\npg_stat_statements"]:::obs --> Prometheus
+        CAdvisor["cAdvisor\nCPU · RAM · rede · disco\npor container"]:::obs --> Prometheus
+        Blackbox["blackbox-exporter\nprobes HTTP externos\n(web e api, como um usuário)"]:::obs --> Prometheus
+        API & Worker -->|"stdout JSON (wide events\ncorrelacionados por trace_id)"| Promtail["Promtail"]:::obs --> Loki["Loki\nlogs · retenção 7d"]:::obs
+        Prometheus --> Grafana["📊 Grafana\n9 dashboards · default 5min\nrecursos por serviço"]:::grafana
         Loki --> Grafana
-        Blackbox["Blackbox exporter"] -->|"probes HTTP"| API
-        Blackbox -->|"probes HTTP"| Web
-        Blackbox --> Prometheus
     end
+
+    Blackbox -.->|"probe"| API
+    Blackbox -.->|"probe"| Web
+
+    classDef user fill:#1E293B,stroke:#0F172A,color:#FFFFFF
+    classDef web fill:#E8F1FF,stroke:#0065FF,color:#0B2A5B
+    classDef api fill:#0065FF,stroke:#0047B3,color:#FFFFFF
+    classDef worker fill:#7C3AED,stroke:#5B21B6,color:#FFFFFF
+    classDef workerSoft fill:#F3EDFF,stroke:#7C3AED,color:#3B1D75
+    classDef db fill:#0F766E,stroke:#115E59,color:#FFFFFF
+    classDef obs fill:#FFF7E6,stroke:#F59E0B,color:#7C2D12
+    classDef grafana fill:#F59E0B,stroke:#B45309,color:#FFFFFF
+    style Core fill:#F6F9FF,stroke:#0065FF,stroke-width:1.5px,color:#0B2A5B
+    style Observability fill:#FFFBF2,stroke:#F59E0B,stroke-dasharray:4 3,color:#7C2D12
 ```
 
 ### Garantias principais
@@ -141,16 +151,37 @@ flowchart TB
 
 ```mermaid
 stateDiagram-v2
-    [*] --> queued : POST /jobs
-    queued --> running : worker claim
-    queued --> cancelled : POST /cancel
-    running --> done : finalize + resultado
-    running --> cancelled : cancelamento cooperativo
-    running --> failed : falha de processamento
-    failed --> queued : POST /retry\n(attempts < 3)
-    failed --> failed : limite atingido + DLQ
+    [*] --> queued : POST /jobs (201)\nIdempotency-Key obrigatória\nrespeita max_concurrent_jobs
+
+    queued --> running : worker claim\nFOR UPDATE SKIP LOCKED\nattempts + 1, lease + worker_id
+    queued --> cancelled : POST /cancel (200)
+
+    running --> done : finalize\nresultado + quota na mesma tx
+    running --> cancelled : cancelamento cooperativo\n(token verificado em ponto seguro)
+    running --> failed : falha de processamento\nou lease vencida (worker morto)
+
+    failed --> queued : POST /retry (200)\nattempts < 3 · backoff 5s/10s
+    failed --> [*] : 3ª falha\nregistro imutável na DLQ
+
     done --> [*]
     cancelled --> [*]
+
+    note right of done
+        [*] encerra o ciclo de transições —
+        não é o banco: o registro permanece
+        na tabela jobs, listável e auditável.
+    end note
+
+    classDef sQueued fill:#E8F1FF,stroke:#0065FF,color:#0B2A5B
+    classDef sRunning fill:#FEF3C7,stroke:#D97706,color:#7C2D12
+    classDef sDone fill:#DCFCE7,stroke:#16A34A,color:#14532D
+    classDef sFailed fill:#FEE2E2,stroke:#DC2626,color:#7F1D1D
+    classDef sCancelled fill:#E5E7EB,stroke:#6B7280,color:#1F2937
+    class queued sQueued
+    class running sRunning
+    class done sDone
+    class failed sFailed
+    class cancelled sCancelled
 ```
 
 ## Proposta para produção
@@ -159,20 +190,56 @@ Como este sistema iria para produção, agnóstico de provedor de cloud. O princ
 
 ```mermaid
 flowchart TB
-    U["Usuários"] --> CDN["CDN + WAF\nSPA estática (build do web/)\ncache imutável por hash"]
-    U -->|"api.dominio.com"| LB["Load balancer L7\nTLS, health checks,\nrate limit por IP/tenant"]
-    LB --> API1["API réplicas 1..N\nuvicorn multi-worker, stateless\ngraceful shutdown p/ rolling deploy"]
-    API1 --> PGB["PgBouncer\n(transaction pooling)"]
-    PGB --> PG[("PostgreSQL gerenciado\nprimário + réplica de leitura\nPITR + backups testados")]
-    W1["Worker réplicas 1..M\nclaim FOR UPDATE SKIP LOCKED"] --> PGB
-    PG -. "LISTEN/NOTIFY\n(conexão direta, fora do pooler)" .-> W1
-    MIG["Job de migrations\n(passo único no deploy)"] --> PG
+    U(["👥 Usuários"]):::user
 
-    subgraph Obs["Observabilidade"]
-        AG["Prometheus / agente"] --> GR["Grafana"]
-        AG --> AM["Alertmanager"] --> ONC["Slack / PagerDuty"]
-        LK["Loki (logs, wide events)"] --> GR
+    subgraph Edge["🌍 Borda"]
+        direction LR
+        CDN["🌐 CDN + WAF\nSPA estática (build do web/)\ncache imutável por hash de asset"]:::infra
+        LB["⚖️ Load balancer L7\nTLS · health checks\nrate limit por IP/tenant"]:::infra
     end
+
+    subgraph Compute["📦 Computação — stateless, autoscaling por métrica"]
+        direction LR
+        API1["⚙️ API réplicas 1..N\nuvicorn multi-worker\ngraceful shutdown p/ rolling deploy\nescala por p99 e fila no pool"]:::api
+        W1["🔁 Worker réplicas 1..M\nclaim FOR UPDATE SKIP LOCKED\nescala por backlog e espera p99"]:::worker
+        MIG["🧱 Job de migrations\npasso único no deploy\n(schema_migrations = idempotente)"]:::infra
+    end
+
+    subgraph Data["🗄️ Dados"]
+        direction LR
+        PGB["PgBouncer\ntransaction pooling\n(lição Shopify: conexão presa\né o gargalo escondido)"]:::infra
+        PG[("PostgreSQL gerenciado\nprimário — fila e transições\nPITR + backups testados")]:::db
+        RR[("Réplica de leitura\ndashboards e admin\nnunca o claim")]:::db
+    end
+
+    subgraph Obs["🔭 Observabilidade"]
+        direction LR
+        AG["Prometheus / agente\nmesmas métricas de hoje"]:::obs --> GR["📊 Grafana"]:::grafana
+        LK["Loki\nwide events por trace_id"]:::obs --> GR
+        AG --> AM["🚨 Alertmanager\ndedup + agrupamento\n+ silêncio em manutenção"]:::alert --> ONC["Slack · PagerDuty · e-mail\n(receivers via secret manager)"]:::alert
+    end
+
+    U ==> CDN
+    U ==>|"api.dominio.com"| LB
+    LB ==> API1
+    API1 ==> PGB ==> PG
+    W1 ==> PGB
+    PG -. "LISTEN/NOTIFY\nconexão direta, fora do pooler\n(transaction pooling não propaga LISTEN)" .-> W1
+    MIG --> PG
+    PG --> RR
+
+    classDef user fill:#1E293B,stroke:#0F172A,color:#FFFFFF
+    classDef infra fill:#334155,stroke:#1E293B,color:#FFFFFF
+    classDef api fill:#0065FF,stroke:#0047B3,color:#FFFFFF
+    classDef worker fill:#7C3AED,stroke:#5B21B6,color:#FFFFFF
+    classDef db fill:#0F766E,stroke:#115E59,color:#FFFFFF
+    classDef obs fill:#FFF7E6,stroke:#F59E0B,color:#7C2D12
+    classDef grafana fill:#F59E0B,stroke:#B45309,color:#FFFFFF
+    classDef alert fill:#FEE2E2,stroke:#DC2626,color:#7F1D1D
+    style Edge fill:#F1F5F9,stroke:#64748B,color:#0F172A
+    style Compute fill:#F6F9FF,stroke:#0065FF,color:#0B2A5B
+    style Data fill:#F0FDFA,stroke:#0F766E,color:#134E4A
+    style Obs fill:#FFFBF2,stroke:#F59E0B,stroke-dasharray:4 3,color:#7C2D12
 ```
 
 Decisões por camada:
