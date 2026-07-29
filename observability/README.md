@@ -8,15 +8,15 @@ manualmente: datasources e dashboards já nascem prontos.
 
 ```mermaid
 flowchart LR
-    subgraph Servicos["📦 Serviços instrumentados"]
+    subgraph Servicos["Serviços instrumentados"]
         direction TB
-        A["⚙️ API :8000\n/metrics + wide events"]:::api
-        K["🔁 Worker :9100\nmétricas de fluxo\n(réplicas via DNS discovery)"]:::worker
-        W["🖥️ Web :5173\nsem métricas próprias\n(sondado de fora)"]:::web
-        P[("🗄️ Postgres\nfonte de verdade\ndo estado da fila")]:::db
+        A["API :8000\n/metrics + wide events"]:::api
+        K["Worker :9100\nmétricas de fluxo\n(réplicas via DNS discovery)"]:::worker
+        W["Web :5173\nsem métricas próprias\n(sondado de fora)"]:::web
+        P[("Postgres\nfonte de verdade\ndo estado da fila")]:::db
     end
 
-    subgraph Coleta["📡 Coleta"]
+    subgraph Coleta["Coleta"]
         direction TB
         PR["Prometheus :9090\nscrape 10s · recording rules\nSLOs e alertas como código"]:::obs
         PE["postgres-exporter\npg_jobs_total (5 status, com zeros)\npg_dlq_total · pg_stat_statements"]:::obs
@@ -25,7 +25,7 @@ flowchart LR
         PT["Promtail\ndescobre containers via Docker\nextrai level/event dos wide events"]:::obs
     end
 
-    subgraph Visual["📊 Armazenamento e visualização"]
+    subgraph Visual["Armazenamento e visualização"]
         direction TB
         L["Loki :3100\nlogs · retenção 7d"]:::obs
         G["Grafana :3000\n9 dashboards provisionados\ndefault: últimos 5 minutos"]:::grafana
@@ -42,15 +42,15 @@ flowchart LR
     PR ==> G
     L ==> G
 
-    classDef api fill:#0065FF,stroke:#0047B3,color:#FFFFFF
-    classDef worker fill:#7C3AED,stroke:#5B21B6,color:#FFFFFF
-    classDef web fill:#E8F1FF,stroke:#0065FF,color:#0B2A5B
-    classDef db fill:#0F766E,stroke:#115E59,color:#FFFFFF
-    classDef obs fill:#FFF7E6,stroke:#F59E0B,color:#7C2D12
-    classDef grafana fill:#F59E0B,stroke:#B45309,color:#FFFFFF
-    style Servicos fill:#F6F9FF,stroke:#0065FF,color:#0B2A5B
-    style Coleta fill:#FFFBF2,stroke:#F59E0B,color:#7C2D12
-    style Visual fill:#FFF7E6,stroke:#B45309,color:#7C2D12
+    classDef api fill:#EAF2FF,stroke:#0065FF,color:#0B2A5B
+    classDef worker fill:#F5F3FF,stroke:#7C3AED,color:#312E81
+    classDef web fill:#ECFEFF,stroke:#0891B2,color:#164E63
+    classDef db fill:#E6F7F5,stroke:#0F766E,color:#134E4A
+    classDef obs fill:#F8FAFC,stroke:#94A3B8,color:#334155
+    classDef grafana fill:#F8FAFC,stroke:#94A3B8,color:#334155
+    style Servicos fill:transparent,stroke:#CBD5E1,color:#64748B
+    style Coleta fill:transparent,stroke:#CBD5E1,color:#64748B
+    style Visual fill:transparent,stroke:#CBD5E1,color:#64748B
 ```
 
 ## Acessos

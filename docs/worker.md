@@ -7,8 +7,8 @@ com o Postgres. Mesmo layout modular da API (`modules/`, `shared/` espelhados).
 
 ```mermaid
 flowchart TD
-    S(["▶️ startup"]):::infra --> D["drain(): processa todo o backlog\nantes de esperar notificações"]:::worker
-    D --> L{"📡 LISTEN jobs_queued\ntimeout 30s"}:::workerSoft
+    S(["startup"]):::infra --> D["drain(): processa todo o backlog\nantes de esperar notificações"]:::worker
+    D --> L{"LISTEN jobs_queued\ntimeout 30s"}:::workerSoft
     L -->|"NOTIFY\n(latência de ms)"| RC
     L -->|"timeout\n(fallback p/ notify perdido)"| RC
 
@@ -24,9 +24,9 @@ flowchart TD
     X --> C
     K --> C
 
-    classDef infra fill:#334155,stroke:#1E293B,color:#FFFFFF
-    classDef worker fill:#7C3AED,stroke:#5B21B6,color:#FFFFFF
-    classDef workerSoft fill:#F3EDFF,stroke:#7C3AED,color:#3B1D75
+    classDef infra fill:#F1F5F9,stroke:#475569,color:#1E293B
+    classDef worker fill:#F5F3FF,stroke:#7C3AED,color:#312E81
+    classDef workerSoft fill:#F5F3FF,stroke:#7C3AED,color:#312E81
     classDef running fill:#FEF3C7,stroke:#D97706,color:#7C2D12
     classDef done fill:#DCFCE7,stroke:#16A34A,color:#14532D
     classDef failed fill:#FEE2E2,stroke:#DC2626,color:#7F1D1D

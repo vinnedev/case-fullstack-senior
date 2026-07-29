@@ -21,14 +21,14 @@ preservam o enunciado original.
 
 ```mermaid
 flowchart LR
-    subgraph Cliente["🖥️ Cliente"]
+    subgraph Cliente["Cliente"]
         W["Web — React + Vite&nbsp;&nbsp;:5173\npolling adaptativo\nIdempotency-Key por intenção"]:::web
     end
-    subgraph Backend["⚙️ Backend"]
+    subgraph Backend["Backend"]
         A["API — FastAPI&nbsp;&nbsp;:8000\nvalidação na borda · wide events\ncommit antes da resposta"]:::api
         K["Worker Python — réplicas 1..N\nlease 30s · cancel cooperativo\nDLQ na 3ª falha"]:::worker
     end
-    subgraph Dados["🗄️ Dados"]
+    subgraph Dados["Dados"]
         P[("PostgreSQL 16\njobs = fila durável\nresultados · auditoria · DLQ")]:::db
     end
 
@@ -37,13 +37,13 @@ flowchart LR
     P -. "LISTEN jobs_queued\nwake-up (fallback: polling 30s)" .-> K
     K ==>|"claim: FOR UPDATE SKIP LOCKED\nfinalize: UPDATE condicional"| P
 
-    classDef web fill:#E8F1FF,stroke:#0065FF,color:#0B2A5B
-    classDef api fill:#0065FF,stroke:#0047B3,color:#FFFFFF
-    classDef worker fill:#7C3AED,stroke:#5B21B6,color:#FFFFFF
-    classDef db fill:#0F766E,stroke:#115E59,color:#FFFFFF
-    style Cliente fill:#F1F5F9,stroke:#64748B,color:#0F172A
-    style Backend fill:#F6F9FF,stroke:#0065FF,color:#0B2A5B
-    style Dados fill:#F0FDFA,stroke:#0F766E,color:#134E4A
+    classDef web fill:#ECFEFF,stroke:#0891B2,color:#164E63
+    classDef api fill:#EAF2FF,stroke:#0065FF,color:#0B2A5B
+    classDef worker fill:#F5F3FF,stroke:#7C3AED,color:#312E81
+    classDef db fill:#E6F7F5,stroke:#0F766E,color:#134E4A
+    style Cliente fill:transparent,stroke:#CBD5E1,color:#64748B
+    style Backend fill:transparent,stroke:#CBD5E1,color:#64748B
+    style Dados fill:transparent,stroke:#CBD5E1,color:#64748B
 ```
 
 Pontos estruturais:
@@ -104,17 +104,17 @@ recebe uma entrada na DLQ.
 ```mermaid
 sequenceDiagram
     autonumber
-    box rgb(241, 245, 249) Cliente
-        participant U as 👤 Usuário
+    box rgb(248, 250, 252) Cliente
+        participant U as Usuário
     end
-    box rgb(232, 241, 255) Backend
-        participant A as ⚙️ API
+    box rgb(248, 250, 252) Backend
+        participant A as API
     end
-    box rgb(240, 253, 250) Dados
-        participant P as 🗄️ Postgres
+    box rgb(248, 250, 252) Dados
+        participant P as Postgres
     end
-    box rgb(243, 237, 255) Processamento
-        participant K as 🔁 Worker
+    box rgb(248, 250, 252) Processamento
+        participant K as Worker
     end
 
     K->>+P: claim: UPDATE jobs SET running (tx própria, commit)

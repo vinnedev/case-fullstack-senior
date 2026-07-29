@@ -47,13 +47,13 @@ toasts ancorados na base em telas pequenas.
 ```mermaid
 sequenceDiagram
     autonumber
-    box rgb(241, 245, 249) Navegador
-        participant U as 👤 Usuário
-        participant L as 🖥️ JobsPanel
-        participant Q as 🗂️ TanStack Query
+    box rgb(248, 250, 252) Navegador
+        participant U as Usuário
+        participant L as JobsPanel
+        participant Q as TanStack Query
     end
-    box rgb(232, 241, 255) Backend
-        participant A as ⚙️ API
+    box rgb(248, 250, 252) Backend
+        participant A as API
     end
 
     U->>L: clique "Cancelar"<br/>(botão visível só em queued/running)

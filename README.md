@@ -97,19 +97,19 @@ O CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) roda em cada push/
 
 ```mermaid
 flowchart TB
-    User(["👤 Usuário"]):::user --> Web["🖥️ Web — SPA React + Vite&nbsp;&nbsp;:5173\npolling adaptativo (1s só com job ativo)\nIdempotency-Key gerada por intenção"]:::web
-    Web ==>|"HTTP · X-Auth (tenant:role)\nIdempotency-Key no create"| API["⚙️ API — FastAPI&nbsp;&nbsp;:8000\nstateless · validação Pydantic na borda\nwide events + graceful shutdown"]:::api
+    User(["Usuário"]):::user --> Web["Web — SPA React + Vite&nbsp;&nbsp;:5173\npolling adaptativo (1s só com job ativo)\nIdempotency-Key gerada por intenção"]:::web
+    Web ==>|"HTTP · X-Auth (tenant:role)\nIdempotency-Key no create"| API["API — FastAPI&nbsp;&nbsp;:8000\nstateless · validação Pydantic na borda\nwide events + graceful shutdown"]:::api
 
-    subgraph Core["🔒 Núcleo transacional — o Postgres arbitra as corridas"]
+    subgraph Core["Núcleo transacional — o Postgres arbitra as corridas"]
         direction TB
-        API ==>|"SQL parametrizado\npool psycopg · commit antes da resposta"| DB[("🗄️ PostgreSQL 16\njobs = fila durável · job_results\njob_audit_events · dead_letter_jobs")]:::db
-        API -. "pg_notify('jobs_queued')\nentregue no commit" .-> Listener["📡 LISTEN jobs_queued\nfallback: polling 30s\n+ drain() no startup"]:::workerSoft
-        Listener --> Worker["🔁 Worker Python — réplicas 1..N\nclaim → executa → finaliza\nlease 30s · token cooperativo de cancel"]:::worker
+        API ==>|"SQL parametrizado\npool psycopg · commit antes da resposta"| DB[("PostgreSQL 16\njobs = fila durável · job_results\njob_audit_events · dead_letter_jobs")]:::db
+        API -. "pg_notify('jobs_queued')\nentregue no commit" .-> Listener["LISTEN jobs_queued\nfallback: polling 30s\n+ drain() no startup"]:::workerSoft
+        Listener --> Worker["Worker Python — réplicas 1..N\nclaim → executa → finaliza\nlease 30s · token cooperativo de cancel"]:::worker
         Worker ==>|"claim: FOR UPDATE SKIP LOCKED\nlease + worker_id"| DB
         Worker ==>|"finalize/failure: UPDATE condicional\nresultado + quota + auditoria na mesma tx"| DB
     end
 
-    subgraph Observability["🔭 Observabilidade — provisionada por código"]
+    subgraph Observability["Observabilidade — provisionada por código"]
         direction TB
         API -->|"/metrics"| Prometheus["Prometheus\nscrape 10s · SLOs e alertas como código"]:::obs
         Worker -->|":9100/metrics\n(réplicas via DNS discovery)"| Prometheus
@@ -117,23 +117,23 @@ flowchart TB
         CAdvisor["cAdvisor\nCPU · RAM · rede · disco\npor container"]:::obs --> Prometheus
         Blackbox["blackbox-exporter\nprobes HTTP externos\n(web e api, como um usuário)"]:::obs --> Prometheus
         API & Worker -->|"stdout JSON (wide events\ncorrelacionados por trace_id)"| Promtail["Promtail"]:::obs --> Loki["Loki\nlogs · retenção 7d"]:::obs
-        Prometheus --> Grafana["📊 Grafana\n9 dashboards · default 5min\nrecursos por serviço"]:::grafana
+        Prometheus --> Grafana["Grafana\n9 dashboards · default 5min\nrecursos por serviço"]:::grafana
         Loki --> Grafana
     end
 
     Blackbox -.->|"probe"| API
     Blackbox -.->|"probe"| Web
 
-    classDef user fill:#1E293B,stroke:#0F172A,color:#FFFFFF
-    classDef web fill:#E8F1FF,stroke:#0065FF,color:#0B2A5B
-    classDef api fill:#0065FF,stroke:#0047B3,color:#FFFFFF
-    classDef worker fill:#7C3AED,stroke:#5B21B6,color:#FFFFFF
-    classDef workerSoft fill:#F3EDFF,stroke:#7C3AED,color:#3B1D75
-    classDef db fill:#0F766E,stroke:#115E59,color:#FFFFFF
-    classDef obs fill:#FFF7E6,stroke:#F59E0B,color:#7C2D12
-    classDef grafana fill:#F59E0B,stroke:#B45309,color:#FFFFFF
-    style Core fill:#F6F9FF,stroke:#0065FF,stroke-width:1.5px,color:#0B2A5B
-    style Observability fill:#FFFBF2,stroke:#F59E0B,stroke-dasharray:4 3,color:#7C2D12
+    classDef user fill:#F8FAFC,stroke:#64748B,color:#0F172A
+    classDef web fill:#ECFEFF,stroke:#0891B2,color:#164E63
+    classDef api fill:#EAF2FF,stroke:#0065FF,color:#0B2A5B
+    classDef worker fill:#F5F3FF,stroke:#7C3AED,color:#312E81
+    classDef workerSoft fill:#F5F3FF,stroke:#7C3AED,color:#312E81
+    classDef db fill:#E6F7F5,stroke:#0F766E,color:#134E4A
+    classDef obs fill:#F8FAFC,stroke:#94A3B8,color:#334155
+    classDef grafana fill:#F8FAFC,stroke:#94A3B8,color:#334155
+    style Core fill:transparent,stroke:#CBD5E1,color:#64748B
+    style Observability fill:transparent,stroke:#CBD5E1,color:#64748B
 ```
 
 ### Garantias principais
@@ -190,33 +190,33 @@ Como este sistema iria para produção, agnóstico de provedor de cloud. O princ
 
 ```mermaid
 flowchart TB
-    U(["👥 Usuários"]):::user
+    U(["Usuários"]):::user
 
-    subgraph Edge["🌍 Borda"]
+    subgraph Edge["Borda"]
         direction LR
-        CDN["🌐 CDN + WAF\nSPA estática (build do web/)\ncache imutável por hash de asset"]:::infra
-        LB["⚖️ Load balancer L7\nTLS · health checks\nrate limit por IP/tenant"]:::infra
+        CDN["CDN + WAF\nSPA estática (build do web/)\ncache imutável por hash de asset"]:::infra
+        LB["Load balancer L7\nTLS · health checks\nrate limit por IP/tenant"]:::infra
     end
 
-    subgraph Compute["📦 Computação — stateless, autoscaling por métrica"]
+    subgraph Compute["Computação — stateless, autoscaling por métrica"]
         direction LR
-        API1["⚙️ API réplicas 1..N\nuvicorn multi-worker\ngraceful shutdown p/ rolling deploy\nescala por p99 e fila no pool"]:::api
-        W1["🔁 Worker réplicas 1..M\nclaim FOR UPDATE SKIP LOCKED\nescala por backlog e espera p99"]:::worker
-        MIG["🧱 Job de migrations\npasso único no deploy\n(schema_migrations = idempotente)"]:::infra
+        API1["API réplicas 1..N\nuvicorn multi-worker\ngraceful shutdown p/ rolling deploy\nescala por p99 e fila no pool"]:::api
+        W1["Worker réplicas 1..M\nclaim FOR UPDATE SKIP LOCKED\nescala por backlog e espera p99"]:::worker
+        MIG["Job de migrations\npasso único no deploy\n(schema_migrations = idempotente)"]:::infra
     end
 
-    subgraph Data["🗄️ Dados"]
+    subgraph Data["Dados"]
         direction LR
         PGB["PgBouncer\ntransaction pooling\n(lição Shopify: conexão presa\né o gargalo escondido)"]:::infra
         PG[("PostgreSQL gerenciado\nprimário — fila e transições\nPITR + backups testados")]:::db
         RR[("Réplica de leitura\ndashboards e admin\nnunca o claim")]:::db
     end
 
-    subgraph Obs["🔭 Observabilidade"]
+    subgraph Obs["Observabilidade"]
         direction LR
-        AG["Prometheus / agente\nmesmas métricas de hoje"]:::obs --> GR["📊 Grafana"]:::grafana
+        AG["Prometheus / agente\nmesmas métricas de hoje"]:::obs --> GR["Grafana"]:::grafana
         LK["Loki\nwide events por trace_id"]:::obs --> GR
-        AG --> AM["🚨 Alertmanager\ndedup + agrupamento\n+ silêncio em manutenção"]:::alert --> ONC["Slack · PagerDuty · e-mail\n(receivers via secret manager)"]:::alert
+        AG --> AM["Alertmanager\ndedup + agrupamento\n+ silêncio em manutenção"]:::alert --> ONC["Slack · PagerDuty · e-mail\n(receivers via secret manager)"]:::alert
     end
 
     U ==> CDN
@@ -228,18 +228,18 @@ flowchart TB
     MIG --> PG
     PG --> RR
 
-    classDef user fill:#1E293B,stroke:#0F172A,color:#FFFFFF
-    classDef infra fill:#334155,stroke:#1E293B,color:#FFFFFF
-    classDef api fill:#0065FF,stroke:#0047B3,color:#FFFFFF
-    classDef worker fill:#7C3AED,stroke:#5B21B6,color:#FFFFFF
-    classDef db fill:#0F766E,stroke:#115E59,color:#FFFFFF
-    classDef obs fill:#FFF7E6,stroke:#F59E0B,color:#7C2D12
-    classDef grafana fill:#F59E0B,stroke:#B45309,color:#FFFFFF
-    classDef alert fill:#FEE2E2,stroke:#DC2626,color:#7F1D1D
-    style Edge fill:#F1F5F9,stroke:#64748B,color:#0F172A
-    style Compute fill:#F6F9FF,stroke:#0065FF,color:#0B2A5B
-    style Data fill:#F0FDFA,stroke:#0F766E,color:#134E4A
-    style Obs fill:#FFFBF2,stroke:#F59E0B,stroke-dasharray:4 3,color:#7C2D12
+    classDef user fill:#F8FAFC,stroke:#64748B,color:#0F172A
+    classDef infra fill:#F1F5F9,stroke:#475569,color:#1E293B
+    classDef api fill:#EAF2FF,stroke:#0065FF,color:#0B2A5B
+    classDef worker fill:#F5F3FF,stroke:#7C3AED,color:#312E81
+    classDef db fill:#E6F7F5,stroke:#0F766E,color:#134E4A
+    classDef obs fill:#F8FAFC,stroke:#94A3B8,color:#334155
+    classDef grafana fill:#F8FAFC,stroke:#94A3B8,color:#334155
+    classDef alert fill:#FEF2F2,stroke:#B91C1C,color:#7F1D1D
+    style Edge fill:transparent,stroke:#CBD5E1,color:#64748B
+    style Compute fill:transparent,stroke:#CBD5E1,color:#64748B
+    style Data fill:transparent,stroke:#CBD5E1,color:#64748B
+    style Obs fill:transparent,stroke:#CBD5E1,color:#64748B
 ```
 
 Decisões por camada:

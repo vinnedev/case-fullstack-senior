@@ -34,10 +34,10 @@ flowchart LR
     R --> S["service\nregra de negócio + SQL cru\nsem nada de FastAPI\ncommit antes da resposta"]:::api
     S ==>|"SQL parametrizado\npool psycopg"| DB[("Postgres\nlocks de linha · ON CONFLICT\nUPDATEs condicionais")]:::db
 
-    classDef user fill:#1E293B,stroke:#0F172A,color:#FFFFFF
-    classDef infra fill:#334155,stroke:#1E293B,color:#FFFFFF
-    classDef api fill:#0065FF,stroke:#0047B3,color:#FFFFFF
-    classDef db fill:#0F766E,stroke:#115E59,color:#FFFFFF
+    classDef user fill:#F8FAFC,stroke:#64748B,color:#0F172A
+    classDef infra fill:#F1F5F9,stroke:#475569,color:#1E293B
+    classDef api fill:#EAF2FF,stroke:#0065FF,color:#0B2A5B
+    classDef db fill:#E6F7F5,stroke:#0F766E,color:#134E4A
 ```
 
 ## Autenticação

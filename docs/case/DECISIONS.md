@@ -26,6 +26,8 @@ o que é, como você o encontrou, qual a causa raiz e qual o impacto.
   - O worker original fazia `SELECT ... WHERE status='queued'` **sem** `FOR UPDATE SKIP LOCKED`: duas réplicas pegariam o mesmo job, gravando resultado e debitando quota em dobro (sintoma 2, "cota cai rápido demais").
   - Numa exceção do worker, o rollback desfazia inclusive o `status='running'` e o job voltava a `queued`, **retentado para sempre**, sem nenhum registro do erro. Descobri ao simular uma falha e ver o loop infinito nos logs.
   - Não existia graceful shutdown: derrubar a API matava requests em andamento e conexões abertas no meio de transação e processamentos.
+  - O commit da API acontecia **depois** da resposta: o `get_db` (dependency com `yield`) só commitava no teardown, que o FastAPI executa após enviar a resposta. Um cliente rápido recebia o 201 e lia 404 do próprio job. Invisível no curl manual, apareceu no cenário de caos do benchmark (35 ocorrências em ~200 polls).
+  - O contrato do create declarava `status` como literal `queued`, mas o replay da `Idempotency-Key` devolve o job original, que pode já estar `done`. A validação da resposta explodia com 500 — também achado pelo caos, com replays concorrentes reais.
 
 - **Modelagem / performance:**
   - `GET /jobs` fazia um `SELECT count(*)` **por job** dentro do loop (N+1). Com 20k jobs eram 20k+1 queries por request (sintoma 1). Reproduzi com o `generate_series` do próprio [KNOWN_ISSUES.md](KNOWN_ISSUES.md): a listagem ia a segundos.
@@ -50,7 +52,7 @@ resolve a causa raiz (não só o sintoma), e **como você verificou** que resolv
 
 - **Role no admin** (`modules/admin/routes.py`): dependency `require_admin` → 403 para não-admin. Testado.
 
-- **Sintoma 1 (listagem lenta)**: o N+1 virou uma única query com `LEFT JOIN + count + GROUP BY`. O índice `(company_id, created_at)` cobre filtro e ordenação, e a paginação `limit/offset` (máx 200) limita a serialização. Verificação: com 20.000 jobs (carga reproduzível com `db/populate_jobs.sql`) a resposta ficou em ~100ms constantes. `EXPLAIN` confirma o índice. Índices são dirigidos pelas queries reais, deliberadamente **não** indexei colunas de baixa cardinalidade isoladas, que só custariam escrita/RAM.
+- **Sintoma 1 (listagem lenta)**: o N+1 virou uma única query paginada. A primeira versão calculava o `result_count` com `LEFT JOIN + count + GROUP BY`, e o benchmark de carga (ver [benchmark/README.md](../../benchmark/README.md)) mostrou que o `GROUP BY j.id` agregava os 100k jobs da empresa antes do `LIMIT`: 64ms por request no `EXPLAIN ANALYZE`, média de 227ms sob 50 VUs. A versão final pagina primeiro pelo índice `(company_id, created_at)` e só conta resultados para as linhas da página, com subquery correlata no índice único de `job_results`: 0,26ms no mesmo `EXPLAIN`, 246× mais rápido. A paginação `limit/offset` (máx 200) limita a serialização. Verificação: com 20.000 jobs (carga reproduzível com `db/populate_jobs.sql`) a resposta ficou em ~100ms constantes e, sob carga, o cenário `read` do k6 foi de 76 para 318 req/s com p95 caindo de 1,15s para 218ms. Índices são dirigidos pelas queries reais, **não** indexei colunas de baixa cardinalidade isoladas, que só custariam escrita/RAM.
 
 - **Sintoma 2 (duplicação/limite furado)**: no `create_job`, `SELECT ... FOR UPDATE` na linha da company serializa criações da mesma empresa (empresas diferentes não competem). No worker, claim com `FOR UPDATE SKIP LOCKED`. Resultado único garantido no banco: `UNIQUE (job_id)` + `INSERT ... ON CONFLICT DO NOTHING`, e a quota só é debitada quando o insert de resultado realmente acontece. Verificação: 20 POSTs simultâneos → exatamente 2 aceitos (limite 2), 18× 429, além do teste `test_result_and_quota_are_idempotent`.
 
@@ -119,6 +121,35 @@ exatamente a mesma regra (rota de probe + status < 400). O filtro é conservador
 por desenho: se o formato do record não for o esperado, ele deixa passar,
 porque silenciar por engano é pior do que uma linha a mais.
 
+### Benchmark de carga e caos (k6)
+
+Para transformar "escala" em número, montei a pasta
+[`benchmark/`](../../benchmark/README.md): cenários k6 na rede do Compose
+contra 100 mil jobs de uma empresa dedicada, sempre com warmup antes da
+medição, cobrindo todas as rotas e o processamento ponta a ponta. O cenário de
+leitura pagou o investimento logo de cara: expôs que a listagem, mesmo sem o
+N+1, agregava a empresa inteira antes de paginar. Depois da correção, saiu de
+76 para 328 req/s com p95 de 225ms e zero erros. A escrita sustenta 30
+creates/s com p95 de 7,6ms. O ciclo completo (create → fila → worker → done →
+result) roda com e2e p50 de 1,5s dentro da capacidade, e o teste de escala
+provou a horizontalidade do worker: a 3 jobs/s, 1 réplica satura (e2e p95
+27,5s, 102 timeouts) e 4 réplicas seguram p95 em 1,53s com zero timeouts, sem
+nenhum job processado duas vezes.
+
+O cenário de **caos** dispara as corridas que o desenho promete arbitrar —
+replay concorrente da mesma `Idempotency-Key`, duplo retry disputado no mesmo
+job `failed`, cancel no meio do processamento — e encontrou **dois bugs
+reais** antes de fechar em 100%: o commit pós-resposta e o contrato do replay
+(ambos em [§1](#1-achados--problemas-que-identifiquei), corrigidos e cobertos
+por teste). Na rodada final: 1005 requests, 0% falhas, todas as disputas com
+exatamente um vencedor.
+
+Gargalos conhecidos após a otimização: o `count(*)` exato do `X-Total-Count`
+(97% do tempo de banco do caminho de leitura, alavanca registrada em
+[§7](#7-próximos-passos-com-mais-tempo)) e o teto de ~1 job/s por réplica do
+worker (o handler simula 1s), resolvido com réplicas. Números completos, plano
+de cada query e metodologia no README do benchmark.
+
 ---
 
 ## 3. Trade-offs e decisões de design
@@ -150,6 +181,10 @@ ponta a ponta; como resolveu a corrida do cancelamento.)
 - **404 (e não 403) para recurso de outro tenant**: não vazar a existência do ID.
 
 - **Testes contra Postgres real (testcontainers)**: as garantias centrais do case *são* comportamento de Postgres (SKIP LOCKED, ON CONFLICT, locks de linha), portanto evitei mocks e SQLite para testes.
+
+- **Busca por substring com trigram, não full-text**: a busca de `GET /jobs` é `kind ILIKE '%termo%'`. Full-text search (tsvector) casa lexemas e prefixos, não substring arbitrária — `%por%` não encontraria `report`. O índice correto é `pg_trgm` (migration `0012`): o pior caso (termo sem match, que varria a empresa inteira) caiu de 32ms para 0,02ms em 100k linhas, e quando o termo casa tudo o planner ignora o GIN e mantém o early-stop do índice de paginação. Medido no benchmark, plano a plano.
+
+- **Fila própria vs bibliotecas de fila em Postgres**: avaliei pgqueuer, pgmq e pgque antes de manter a implementação. O pgqueuer usa exatamente os mesmos primitivos que o projeto já tem (LISTEN/NOTIFY + `SKIP LOCKED` + polling de fallback), o que valida o desenho, mas adotá-lo trocaria as regras de negócio do case (cancel cooperativo por job, limite por tenant, DLQ auditável, eventos com ator) por convenções genéricas de framework. O pgmq segue o modelo SQS de mensagem opaca com visibility timeout: os jobs aqui são linhas de domínio que a UI consulta por status e tenant, então eu terminaria com fila e tabela de estado separadas, o dual-system que o desenho atual elimina. O pgque é fan-out por event log com tick (~50ms de latência mediana, exige pg_cron), modelo errado para worker competindo por job. A crítica legítima que fica do pgque é o bloat de dead tuples em filas `SKIP LOCKED` sob churn alto — registrada como regra de operação na proposta de produção do README (monitorar autovacuum e arquivar jobs concluídos).
 
 - **Wide events em vez de linhas de log soltas**: um JSON por request/job com contexto de negócio, correlacionável por `trace_id`. Tail sampling mantém o custo controlado.
 
@@ -246,9 +281,11 @@ O que você faria a seguir.
 
 - **Broker dedicado (SQS/RabbitMQ)** apenas se o volume tornar o Postgres o gargalo. O desenho fila-na-tabela + NOTIFY existe justamente para adiar essa troca sem reescrever o worker.
 
+- **Baratear o `count(*)` do `X-Total-Count`**: o benchmark mostrou que, com a listagem otimizada, o total exato virou 97% do tempo de banco do caminho de leitura (24ms por página a 100k jobs). Alavancas possíveis: cachear o total por tenant, estimar acima de um teto com `reltuples` ou tornar o header opcional. Mantive o exato de propósito, correto e barato o suficiente no volume do case.
+
 ---
 
-**Tempo investido:** 12 ~ 14 horas (Os problemas foram resolvidos relativamente rápido, o restante das horas foram investidas em testes e revisão manual pensando que é um serviço crítico e de demanda elevada)
+**Tempo investido:** 12 ~ 14 horas (Os problemas foram resolvidos relativamente rápido, o restante das horas foram investidas em estudos das ferramentas, benchmarks, testes e revisão manual pensando que é um serviço crítico e de demanda elevada)
 
 A revisão manual teve um efeito muito positivo principalmente em validações pequenas e detalhadas que normalmente uma LLM acaba ignorando.
 
