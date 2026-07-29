@@ -1,0 +1,50 @@
+{
+  "uid": "relay-resources",
+  "title": "Resources",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {"from": "now-1h", "to": "now"},
+  "tags": ["relay", "resources"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "CPU por container",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "sum(rate(container_cpu_usage_seconds_total{container!=\"\",container!=\"/\"}[5m])) by (name) * 100", "legendFormat": "{{name}}"}]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Memória residente por container",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "sum(container_memory_working_set_bytes{container!=\"\",container!=\"/\"}) by (name)", "legendFormat": "{{name}}"}]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Memória usada / limite",
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "max": 1}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "sum(container_memory_working_set_bytes{container!=\"\",container!=\"/\"}) by (name) / sum(container_spec_memory_limit_bytes{container!=\"\",container!=\"/\"}) by (name)", "legendFormat": "{{name}}"}]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Rede por container",
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(container_network_receive_bytes_total{container!=\"\",container!=\"/\"}[5m])) by (name)", "legendFormat": "RX {{name}}"},
+        {"refId": "B", "expr": "sum(rate(container_network_transmit_bytes_total{container!=\"\",container!=\"/\"}[5m])) by (name)", "legendFormat": "TX {{name}}"}
+      ]
+    }
+  ]
+}

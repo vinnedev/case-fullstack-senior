@@ -1,0 +1,82 @@
+groups:
+  - name: relay-slos
+    interval: 30s
+    rules:
+      - record: relay:slo_api_availability:ratio5m
+        expr: 1 - (sum(rate(http_request_duration_seconds_count{status=~"5.."}[5m])) / sum(rate(http_request_duration_seconds_count[5m])))
+
+      - record: relay:slo_api_latency_under_1s:ratio5m
+        expr: sum(rate(http_request_duration_seconds_bucket{le="1"}[5m])) / sum(rate(http_request_duration_seconds_count[5m]))
+
+      - record: relay:slo_worker_success:ratio5m
+        expr: sum(rate(jobs_processed_total{outcome="done"}[5m])) / sum(rate(jobs_processed_total{outcome=~"done|failed"}[5m]))
+
+      - alert: RelayAPIHighP99
+        expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) > 1
+        for: 10m
+        labels:
+          severity: warning
+          service: api
+        annotations:
+          summary: API p99 acima de 1 segundo
+          description: O p99 agregado da API está acima do SLO por pelo menos 10 minutos.
+
+      - alert: RelayAPIAvailabilityBurn
+        expr: relay:slo_api_availability:ratio5m < 0.995
+        for: 10m
+        labels:
+          severity: critical
+          service: api
+        annotations:
+          summary: Disponibilidade da API abaixo do SLO
+          description: A disponibilidade de 5 minutos está abaixo de 99,5%.
+
+      - alert: RelayAPIConnectionPoolSaturated
+        expr: api_db_pool_requests_waiting > 0 or api_db_pool_utilization_ratio > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          service: api
+        annotations:
+          summary: Pool de conexões da API saturado
+          description: Requests estão aguardando conexão ou o pool está acima de 90% de utilização.
+
+      - alert: RelayQueueWaitHigh
+        expr: histogram_quantile(0.99, sum(rate(job_queue_wait_seconds_bucket[5m])) by (le)) > 30
+        for: 10m
+        labels:
+          severity: warning
+          service: worker
+        annotations:
+          summary: Espera da fila acima de 30 segundos
+          description: O p99 do tempo entre submissão e claim está acima do limite.
+
+      - alert: RelayQueueBacklogHigh
+        expr: pg_jobs_total{status="queued"} > 100
+        for: 10m
+        labels:
+          severity: warning
+          service: worker
+        annotations:
+          summary: Backlog de jobs elevado
+          description: Mais de 100 jobs estão aguardando processamento.
+
+      - alert: RelayDatabaseConnectionsHigh
+        expr: sum(pg_stat_activity_count{datname="relay"}) / pg_settings_max_connections > 0.8
+        for: 10m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: Muitas conexões no PostgreSQL
+          description: O uso de conexões do banco está acima de 80%.
+
+      - alert: RelayDatabaseDeadlocks
+        expr: rate(pg_stat_database_deadlocks{datname="relay"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: Deadlocks detectados no PostgreSQL
+          description: Há deadlocks persistentes no banco; investigar locks e transações concorrentes.

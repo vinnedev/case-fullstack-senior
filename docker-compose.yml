@@ -1,6 +1,7 @@
 services:
   db:
     image: postgres:16
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "pg_stat_statements.track=all", "-c", "track_io_timing=on"]
     environment:
       POSTGRES_USER: relay
       POSTGRES_PASSWORD: relay
@@ -15,8 +16,19 @@ services:
     build: ./api
     environment:
       DATABASE_URL: postgresql://relay:relay@db:5432/relay
+      CORS_ORIGINS: http://localhost:5173
+      LOG_SUPPRESS_PROBE_ROUTES: ${LOG_SUPPRESS_PROBE_ROUTES:-false}
+      MIGRATIONS_DIR: /app/db_migrations
       PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./db/migrations:/app/db_migrations:ro
     ports: ["8000:8000"]
+    healthcheck:
+      # saudável somente com migrações aplicadas e uvicorn respondendo
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
     depends_on:
       db:
         condition: service_healthy
@@ -24,13 +36,14 @@ services:
     build: ./worker
     environment:
       DATABASE_URL: postgresql://relay:relay@db:5432/relay
+      METRICS_PORT: "9100"
       PYTHONUNBUFFERED: "1"
     restart: on-failure
     depends_on:
       db:
         condition: service_healthy
       api:
-        condition: service_started
+        condition: service_healthy
   seed:
     image: postgres:16
     profiles: ["seed"]
@@ -48,3 +61,68 @@ services:
       VITE_API_URL: http://localhost:8000
     ports: ["5173:5173"]
     depends_on: [api]
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports: ["9090:9090"]
+    depends_on: [api, worker]
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    command: ["--docker_only=true"]
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+    depends_on: [prometheus]
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus, loki]
+
+  loki:
+    image: grafana/loki:3.3.2
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+
+  promtail:
+    image: grafana/promtail:3.3.2
+    command: ["-config.file=/etc/promtail/promtail-config.yml"]
+    volumes:
+      - ./observability/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [loki]
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.16.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://relay:relay@db:5432/relay?sslmode=disable
+      PG_EXPORTER_EXTEND_QUERY_PATH: /etc/postgres_exporter/queries.yml
+    volumes:
+      - ./observability/postgres-exporter/queries.yml:/etc/postgres_exporter/queries.yml:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.25.0
+    volumes:
+      - ./observability/blackbox/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+
+volumes:
+  loki-data:
