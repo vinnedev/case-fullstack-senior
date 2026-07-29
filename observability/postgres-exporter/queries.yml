@@ -1,0 +1,53 @@
+pg_jobs:
+  query: "SELECT status, count(*) AS total FROM jobs GROUP BY status"
+  master: true
+  metrics:
+    - status:
+        usage: "LABEL"
+        description: "Status do job"
+    - total:
+        usage: "GAUGE"
+        description: "Total de jobs por status"
+
+pg_dlq:
+  query: "SELECT count(*) AS total, coalesce(extract(epoch FROM now() - max(failed_at)), -1) AS seconds_since_last FROM dead_letter_jobs"
+  master: true
+  metrics:
+    - total:
+        usage: "GAUGE"
+        description: "Total de jobs na Dead Letter Queue"
+    - seconds_since_last:
+        usage: "GAUGE"
+        description: "Segundos desde a última entrada na DLQ (-1 = nunca)"
+
+pg_query_top:
+  query: "SELECT queryid::text AS queryid, calls, total_exec_time, mean_exec_time, rows, shared_blks_hit, shared_blks_read, blk_read_time, blk_write_time FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND calls > 0 ORDER BY total_exec_time DESC LIMIT 50"
+  master: true
+  metrics:
+    - queryid:
+        usage: "LABEL"
+        description: "Identificador normalizado da query"
+    - calls:
+        usage: "GAUGE"
+        description: "Número de execuções da query"
+    - total_exec_time:
+        usage: "GAUGE"
+        description: "Tempo total de execução em milissegundos"
+    - mean_exec_time:
+        usage: "GAUGE"
+        description: "Tempo médio de execução em milissegundos"
+    - rows:
+        usage: "GAUGE"
+        description: "Linhas retornadas pela query"
+    - shared_blks_hit:
+        usage: "GAUGE"
+        description: "Blocos atendidos pelo cache"
+    - shared_blks_read:
+        usage: "GAUGE"
+        description: "Blocos lidos do disco"
+    - blk_read_time:
+        usage: "GAUGE"
+        description: "Tempo de leitura de blocos em milissegundos"
+    - blk_write_time:
+        usage: "GAUGE"
+        description: "Tempo de escrita de blocos em milissegundos"
