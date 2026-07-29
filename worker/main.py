@@ -1,46 +1,37 @@
-import time
+import os
 
-from sqlalchemy import select
+import psycopg
+from prometheus_client import start_http_server
 
-from modules.companies.models import Company
-from modules.jobs.models import Job, JobResult
-from shared.db.engine import session_scope
-from shared.logging.wide_event import WideEvent, start_event
+from modules.jobs.listener import JOBS_CHANNEL, wait_for_wakeup
+from modules.jobs.processor import process_next
+from shared.config.settings import get_settings
+from shared.db.pool import connection_scope
+from shared.logging.wide_event import WideEvent
+from shared.observability.worker_metrics import worker_wakeups_total
 
 SERVICE = "worker"
+POLL_FALLBACK_S = 30.0
 
-def process_once() -> bool:
-    with session_scope() as session:
-        job = session.execute(
-            select(Job).where(Job.status == "queued").order_by(Job.id).limit(1).with_for_update(skip_locked=True)
-        ).scalar_one_or_none()
-        if not job:
-            return False
-        event = start_event(SERVICE, "job_processed", job_id=job.id, company_id=job.company_id, job_kind=job.kind)
-        try:
-            job.status = "running"
-            job.attempts += 1
-            session.flush()
-            time.sleep(1)  # simula trabalho
-            session.add(JobResult(job_id=job.id, payload=f"resultado sensível da empresa {job.company_id}"))
-            company = session.get(Company, job.company_id)
-            if company is None:
-                raise RuntimeError(f"company {job.company_id} não encontrada para o job {job.id}")
-            company.job_quota -= 1
-            job.status = "done"
-            event.add(outcome="done", attempts=job.attempts)
-            return True
-        except Exception as exc:
-            event.error(exc, outcome="failed")
-            raise
-        finally:
-            event.emit()
 
-def main():
-    WideEvent(SERVICE, "startup").emit()
+def drain() -> None:
     while True:
-        if not process_once():
-            time.sleep(2)
+        with connection_scope() as conn:
+            if not process_next(conn, heartbeat_factory=connection_scope):
+                return
+
+
+def main() -> None:
+    WideEvent(SERVICE, "startup").emit()
+    start_http_server(int(os.environ.get("METRICS_PORT", "9100")))
+    listen_conn = psycopg.connect(get_settings().database_url, autocommit=True)
+    listen_conn.execute(f"LISTEN {JOBS_CHANNEL}")
+    drain()  # backlog acumulado enquanto o worker esteve fora
+    while True:
+        woke_by_notify = wait_for_wakeup(listen_conn, POLL_FALLBACK_S)
+        worker_wakeups_total.labels(reason="notify" if woke_by_notify else "timeout").inc()
+        drain()
+
 
 if __name__ == "__main__":
     main()
