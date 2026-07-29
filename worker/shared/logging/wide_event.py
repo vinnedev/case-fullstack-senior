@@ -4,6 +4,7 @@ import sys
 import time
 import uuid
 from contextvars import ContextVar
+from typing import Self
 
 from shared.config.settings import get_settings
 
@@ -14,7 +15,7 @@ SUCCESS_SAMPLE_RATE = get_settings().log_success_sample_rate
 
 
 class WideEvent:
-    def __init__(self, service: str, name: str, **fields):
+    def __init__(self, service: str, name: str, **fields: object) -> None:
         self._start = time.monotonic()
         self.fields: dict = {
             "event_id": str(uuid.uuid4()),
@@ -24,11 +25,11 @@ class WideEvent:
         }
         self._error = False
 
-    def add(self, **fields):
+    def add(self, **fields: object) -> Self:
         self.fields.update(fields)
         return self
 
-    def error(self, exc: BaseException | None = None, **fields):
+    def error(self, exc: BaseException | None = None, **fields: object) -> Self:
         self._error = True
         if exc is not None:
             self.fields.update({"error_type": type(exc).__name__, "error_message": str(exc)})
@@ -40,19 +41,21 @@ class WideEvent:
             return True
         return random.random() < SUCCESS_SAMPLE_RATE
 
-    def emit(self):
+    def emit(self) -> None:
         duration_ms = round((time.monotonic() - self._start) * 1000, 2)
         if not self._should_emit(duration_ms):
             return
-        self.fields.update({
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "duration_ms": duration_ms,
-            "level": "error" if self._error else "info",
-        })
+        self.fields.update(
+            {
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "duration_ms": duration_ms,
+                "level": "error" if self._error else "info",
+            }
+        )
         print(json.dumps(self.fields, default=str), file=sys.stdout, flush=True)
 
 
-def start_event(service: str, name: str, **fields) -> WideEvent:
+def start_event(service: str, name: str, **fields: object) -> WideEvent:
     event = WideEvent(service, name, **fields)
     _current_event.set(event)
     return event

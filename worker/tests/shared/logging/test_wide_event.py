@@ -1,9 +1,7 @@
 import json
 
-import pytest
-
 from shared.logging import wide_event as we
-from shared.logging.wide_event import WideEvent, start_event, current_event
+from shared.logging.wide_event import WideEvent, current_event, start_event
 
 
 def emitted(capsys) -> dict | None:
@@ -13,9 +11,15 @@ def emitted(capsys) -> dict | None:
     return json.loads(out.splitlines()[-1])
 
 
+def last_event(capsys) -> dict:
+    event = emitted(capsys)
+    assert event is not None
+    return event
+
+
 def test_emit_outputs_single_json_line_with_base_fields(capsys):
     WideEvent("svc", "thing_happened").add(foo="bar").emit()
-    event = emitted(capsys)
+    event = last_event(capsys)
     assert event["service"] == "svc"
     assert event["event"] == "thing_happened"
     assert event["foo"] == "bar"
@@ -28,7 +32,7 @@ def test_add_accumulates_context_progressively(capsys):
     event.add(step_one=True)
     event.add(step_two=2)
     event.emit()
-    out = emitted(capsys)
+    out = last_event(capsys)
     assert out["step_one"] is True
     assert out["step_two"] == 2
 
@@ -37,7 +41,7 @@ def test_error_captures_exception_and_sets_level(capsys):
     event = WideEvent("svc", "request")
     event.error(ValueError("boom"), outcome="failed")
     event.emit()
-    out = emitted(capsys)
+    out = last_event(capsys)
     assert out["level"] == "error"
     assert out["error_type"] == "ValueError"
     assert out["error_message"] == "boom"
@@ -56,14 +60,14 @@ def test_errors_always_emit_even_with_sample_rate_zero(capsys, monkeypatch):
     event = WideEvent("svc", "request")
     event.error(RuntimeError("x"))
     event.emit()
-    assert emitted(capsys)["level"] == "error"
+    assert last_event(capsys)["level"] == "error"
 
 
 def test_slow_events_always_emit_even_with_sample_rate_zero(capsys, monkeypatch):
     monkeypatch.setattr(we, "SUCCESS_SAMPLE_RATE", 0.0)
     monkeypatch.setattr(we, "SLOW_THRESHOLD_MS", 0.0)
     WideEvent("svc", "request").emit()
-    assert emitted(capsys)["level"] == "info"
+    assert last_event(capsys)["level"] == "info"
 
 
 def test_start_event_binds_current_event():
