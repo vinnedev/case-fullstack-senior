@@ -1,0 +1,2 @@
+ALTER TABLE jobs ADD COLUMN trace_id TEXT;
+ALTER TABLE jobs ADD COLUMN last_error TEXT;

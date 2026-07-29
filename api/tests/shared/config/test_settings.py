@@ -9,16 +9,19 @@ def test_defaults_applied():
     assert s.db_pool_size == 5
     assert s.db_max_overflow == 10
     assert s.log_success_sample_rate == 1.0
+    assert s.log_suppress_probe_routes is False
 
 
 def test_reads_from_environment(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://env")
     monkeypatch.setenv("DB_POOL_SIZE", "7")
     monkeypatch.setenv("LOG_SUCCESS_SAMPLE_RATE", "0.25")
+    monkeypatch.setenv("LOG_SUPPRESS_PROBE_ROUTES", "true")
     s = _from_environ()
     assert s.database_url == "postgresql://env"
     assert s.db_pool_size == 7
     assert s.log_success_sample_rate == 0.25
+    assert s.log_suppress_probe_routes is True
 
 
 def test_rejects_invalid_values(monkeypatch):

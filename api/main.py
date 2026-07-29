@@ -1,83 +1,96 @@
-import asyncio
+import time
 import uuid
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import make_asgi_app
 
-from auth import AuthContext, current_ctx
-from modules.companies.models import Company
-from modules.jobs.models import Job, JobResult
-from modules.jobs.schemas import AdminJob, JobCreated, JobDetail, JobResultOut, JobSummary, NewJob
-from shared.db.engine import dispose_engine, get_session
-from shared.logging.wide_event import WideEvent, start_event, current_event
+from modules.admin.routes import router as admin_router
+from modules.jobs.routes import router as jobs_router
+from shared.config.settings import get_settings
+from shared.db.pool import dispose_pool
+from shared.http.docs import install_branded_docs
+from shared.http.graceful_shutdown import GracefulShutdown
+from shared.logging.access_log import install_probe_route_access_filter
+from shared.logging.wide_event import WideEvent, start_event
+from shared.observability.api_metrics import http_request_duration_seconds, http_requests_in_flight
 
 SERVICE = "api"
 SHUTDOWN_DRAIN_TIMEOUT = 30.0
+PROBE_LOG_PATHS = frozenset({"/health", "/healthz", "/ready", "/readyz", "/live", "/livez"})
+
+shutdown = GracefulShutdown(SERVICE)
 
 
-class GracefulShutdown:
-    def __init__(self):
-        self.shutting_down = False
-        self._in_flight = 0
-        self._lock = asyncio.Lock()
-        self._drained = asyncio.Event()
-        self._drained.set()
+def is_probe_route(path: str) -> bool:
+    return path in PROBE_LOG_PATHS or path == "/metrics" or path.startswith("/metrics/")
 
-    async def request_started(self) -> bool:
-        if self.shutting_down:
-            return False
-        async with self._lock:
-            self._in_flight += 1
-            self._drained.clear()
+
+def should_emit_request_log(path: str, suppress_probe_routes: bool, status: int = 200) -> bool:
+    """Rotas de scrape/health poluem o Grafana com ruído sem valor de negócio.
+
+    A supressão é opt-in por env e vale apenas para respostas bem-sucedidas:
+    um /health ou /metrics quebrado continua logando (é exatamente o momento
+    em que o log importa).
+    """
+    if not suppress_probe_routes or status >= 400:
         return True
-
-    async def request_finished(self):
-        async with self._lock:
-            self._in_flight -= 1
-            if self._in_flight <= 0:
-                self._drained.set()
-
-    async def drain(self, timeout: float):
-        self.shutting_down = True
-        if self._in_flight <= 0:
-            return
-        try:
-            await asyncio.wait_for(self._drained.wait(), timeout)
-        except asyncio.TimeoutError:
-            WideEvent(SERVICE, "shutdown_drain_timeout").error(timeout_s=timeout, in_flight=self._in_flight).emit()
-
-
-shutdown = GracefulShutdown()
+    return not is_probe_route(path)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    if get_settings().log_suppress_probe_routes:
+        # o access log do uvicorn é um canal separado do wide event: a mesma
+        # flag precisa silenciar os dois, senão o ruído continua no Grafana
+        install_probe_route_access_filter(is_probe_route)
     WideEvent(SERVICE, "startup").emit()
     yield
     event = WideEvent(SERVICE, "shutdown")
     await shutdown.drain(SHUTDOWN_DRAIN_TIMEOUT)
-    dispose_engine()
+    dispose_pool()
     event.add(drained=True, db_pool_disposed=True).emit()
 
 
 API_DESCRIPTION = """
-API do **Relay**: submissão e acompanhamento de jobs assíncronos por empresa.
+API do **Relay**: submissão e acompanhamento de jobs assíncronos por empresa (multi-tenant).
 
 ## Autenticação
 
-Todas as rotas exigem o header `X-Auth` no formato `<company_id>:<role>`
-(ex.: `1:admin`). Simplificação do case — sem assinatura.
+Todas as rotas exigem o header **`X-Auth`** (obrigatório — sem ele a resposta é `401`)
+no formato `<company_id>:<role>`, ex.: `1:user` ou `2:admin`.
+Simplificação do case — sem assinatura. Todo acesso é isolado por empresa:
+recursos de outro tenant respondem `404`.
 
-## Fluxo
+## Ciclo de vida do job
 
-1. `POST /jobs` cria um job com status `queued` (sujeito ao limite de
-   concorrência da empresa).
-2. O worker processa a fila e grava o resultado.
-3. `GET /jobs/{id}` acompanha o status; `GET /jobs/{id}/result` lê o payload.
+`queued` → `running` → `done` &nbsp;|&nbsp; `failed` (após 3 tentativas) &nbsp;|&nbsp; `cancelled`
+
+1. `POST /jobs` cria um job `queued` (sujeito ao limite de concorrência da empresa — `429`).
+2. O worker processa a fila e grava o resultado (um por job).
+3. `GET /jobs/{id}` acompanha status/tentativas/último erro; `GET /jobs/{id}/result` lê o payload.
+4. `POST /jobs/{id}/cancel` cancela em `queued`/`running`; `POST /jobs/{id}/retry` reenfileira um `failed`.
+
+## Idempotência
+
+O header **`Idempotency-Key`** no `POST /jobs` é **obrigatório** (`422` se ausente):
+repetir a mesma chave (por empresa) devolve o job original em vez de criar outro —
+proteção contra duplo-clique e retry de rede. Cancel e retry são
+idempotentes por estado: a segunda chamada responde `409`.
+
+## Erros
+
+| Código | Quando |
+|---|---|
+| `401` | `X-Auth` ausente/inválido ou empresa desconhecida |
+| `403` | Rota admin sem role `admin` |
+| `404` | Job inexistente **ou de outra empresa** (não vazamos existência) |
+| `409` | Transição de estado inválida (cancelar `done`, retry sem ser `failed`, máximo de tentativas) |
+| `422` | Validação: tipos/formatos/faixas errados, com o campo apontado em `detail` |
+| `429` | Limite de jobs concorrentes da empresa atingido |
 """
 
 TAGS_METADATA = [
@@ -88,15 +101,37 @@ TAGS_METADATA = [
 app = FastAPI(
     title="Relay API",
     version="0.1.0",
+    summary="Processamento de jobs em background, multi-tenant.",
     description=API_DESCRIPTION,
     openapi_tags=TAGS_METADATA,
+    contact={"name": "Relay · Galaxies", "url": "https://www.galaxies.com.br"},
     lifespan=lifespan,
+    docs_url=None,
+    swagger_ui_parameters={
+        "docExpansion": "list",
+        "defaultModelsExpandDepth": 0,
+        "displayRequestDuration": True,
+        "tryItOutEnabled": True,
+    },
 )
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+install_branded_docs(app)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in get_settings().cors_origins.split(",") if o.strip()],
+    allow_methods=["GET", "POST"],
+    allow_headers=["X-Auth", "Content-Type", "Idempotency-Key"],
+    expose_headers=["X-Total-Count"],
+    max_age=600,
+)
+
+
+@app.get("/health", include_in_schema=False)
+def health() -> dict[str, str]:
+    return {"status": "ok"}
 
 
 @app.middleware("http")
-async def request_lifecycle_middleware(request, call_next):
+async def request_lifecycle_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     if not await shutdown.request_started():
         return JSONResponse({"detail": "servidor encerrando"}, status_code=503, headers={"Connection": "close"})
     event = start_event(
@@ -106,104 +141,32 @@ async def request_lifecycle_middleware(request, call_next):
         http_method=request.method,
         http_path=request.url.path,
     )
+    started = time.perf_counter()
+    status = 500
+    http_requests_in_flight.inc()
     try:
         response = await call_next(request)
-        event.add(http_status=response.status_code)
-        if response.status_code >= 500:
+        status = response.status_code
+        event.add(http_status=status)
+        if status >= 500:
             event.error()
         return response
     except Exception as exc:
         event.error(exc, http_status=500)
         raise
     finally:
-        event.emit()
+        if not request.url.path.startswith("/metrics"):
+            route = request.scope.get("route")
+            route_path = getattr(route, "path", "unmatched")
+            http_request_duration_seconds.labels(method=request.method, route=route_path, status=str(status)).observe(
+                time.perf_counter() - started
+            )
+        http_requests_in_flight.dec()
+        if should_emit_request_log(request.url.path, get_settings().log_suppress_probe_routes, status):
+            event.emit()
         await shutdown.request_finished()
 
 
-@app.get(
-    "/jobs",
-    tags=["jobs"],
-    summary="Lista os jobs da empresa autenticada",
-    response_model=list[JobSummary],
-    responses={401: {"description": "Header X-Auth ausente ou inválido"}},
-)
-def list_jobs(ctx: AuthContext = Depends(current_ctx), session: Session = Depends(get_session)) -> list[JobSummary]:
-    current_event().add(company_id=ctx.company_id, role=ctx.role)
-    rows = session.execute(
-        select(Job, func.count(JobResult.id))
-        .outerjoin(JobResult, JobResult.job_id == Job.id)
-        .where(Job.company_id == ctx.company_id)
-        .group_by(Job.id)
-        .order_by(Job.created_at.desc())
-    ).all()
-    out = [
-        JobSummary(id=job.id, kind=job.kind, status=job.status, created_at=job.created_at, result_count=count)
-        for job, count in rows
-    ]
-    current_event().add(jobs_returned=len(out))
-    return out
-
-@app.get(
-    "/jobs/{job_id}",
-    tags=["jobs"],
-    summary="Consulta o status de um job",
-    response_model=JobDetail,
-    responses={404: {"description": "Job não encontrado"}},
-)
-def get_job(job_id: int, ctx: AuthContext = Depends(current_ctx), session: Session = Depends(get_session)) -> JobDetail:
-    current_event().add(company_id=ctx.company_id, job_id=job_id)
-    job = session.get(Job, job_id)
-    if not job:
-        raise HTTPException(404, "not found")
-    current_event().add(job_kind=job.kind, job_status=job.status)
-    return JobDetail.model_validate(job)
-
-@app.get(
-    "/jobs/{job_id}/result",
-    tags=["jobs"],
-    summary="Lê o resultado de um job concluído",
-    response_model=JobResultOut,
-    responses={404: {"description": "Job sem resultado disponível"}},
-)
-def get_result(job_id: int, ctx: AuthContext = Depends(current_ctx), session: Session = Depends(get_session)) -> JobResultOut:
-    current_event().add(company_id=ctx.company_id, job_id=job_id)
-    result = session.execute(select(JobResult).where(JobResult.job_id == job_id)).scalar_one_or_none()
-    if not result:
-        raise HTTPException(404, "no result")
-    return JobResultOut.model_validate(result)
-
-@app.post(
-    "/jobs",
-    tags=["jobs"],
-    summary="Cria um novo job",
-    status_code=201,
-    response_model=JobCreated,
-    responses={429: {"description": "Limite de jobs concorrentes da empresa atingido"}},
-)
-def create_job(body: NewJob, ctx: AuthContext = Depends(current_ctx), session: Session = Depends(get_session)) -> JobCreated:
-    event = current_event().add(company_id=ctx.company_id, job_kind=body.kind)
-    company = session.get(Company, ctx.company_id)
-    if not company:
-        raise HTTPException(401, "empresa desconhecida")
-    running = session.execute(
-        select(func.count()).select_from(Job).where(Job.company_id == company.id, Job.status.in_(("queued", "running")))
-    ).scalar_one()
-    event.add(concurrency_limit=company.max_concurrent_jobs, jobs_running=running)
-    if running >= company.max_concurrent_jobs:
-        raise HTTPException(429, "limite de jobs concorrentes atingido")
-    job = Job(company_id=company.id, kind=body.kind, status="queued")
-    session.add(job)
-    session.flush()
-    event.add(job_id=job.id)
-    return JobCreated(id=job.id, status=job.status)
-
-@app.get(
-    "/admin/jobs",
-    tags=["admin"],
-    summary="Lista todos os jobs de todas as empresas",
-    response_model=list[AdminJob],
-)
-def admin_jobs(ctx: AuthContext = Depends(current_ctx), session: Session = Depends(get_session)) -> list[AdminJob]:
-    current_event().add(company_id=ctx.company_id, role=ctx.role)
-    jobs = session.execute(select(Job).order_by(Job.id)).scalars().all()
-    return [AdminJob.model_validate(j) for j in jobs]
+app.include_router(jobs_router)
+app.include_router(admin_router)
+app.mount("/metrics", make_asgi_app())
