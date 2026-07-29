@@ -59,6 +59,9 @@ docker compose down
 
 # Encerrar e remover dados locais do PostgreSQL e Loki
 docker compose down -v
+
+# Carga de 20k jobs para reproduzir o benchmark de listagem (Sintoma 1)
+docker compose exec -T db psql -U relay -d relay < db/populate_jobs.sql
 ```
 
 ## Testar
@@ -79,6 +82,8 @@ Checagens de qualidade Python:
 ```
 
 Cada serviço carrega somente seu próprio arquivo de ambiente local: `api/.env`, `worker/.env` ou `web/.env`. Use o respectivo `.env.example` como ponto de partida. O Compose não depende de `.env` na raiz.
+
+O CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) roda em cada push/PR: lint (`ruff`) e type check (`pyright`) de API e worker, os testes dos três serviços e o build das imagens do Compose.
 
 ## Como funciona
 
