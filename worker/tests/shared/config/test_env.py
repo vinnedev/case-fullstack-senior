@@ -47,14 +47,17 @@ def test_load_env_missing_file_is_noop(tmp_path):
     assert load_env(tmp_path / ".env") == {}
 
 
-def test_find_env_file_searches_parent_directories(tmp_path):
+def test_find_env_file_reads_service_root(tmp_path):
     (tmp_path / ".env").write_text("TEST_ENV_KEY=abc\n")
-    nested = tmp_path / "a" / "b"
-    nested.mkdir(parents=True)
-    assert find_env_file(nested) == tmp_path / ".env"
+    assert find_env_file(tmp_path) == tmp_path / ".env"
+
+
+def test_find_env_file_does_not_search_parent_directories(tmp_path):
+    (tmp_path / ".env").write_text("TEST_ENV_KEY=parent\n")
+    service_root = tmp_path / "worker"
+    service_root.mkdir()
+    assert find_env_file(service_root) is None
 
 
 def test_find_env_file_returns_none_when_absent(tmp_path):
-    nested = tmp_path / "a"
-    nested.mkdir()
-    assert find_env_file(nested) is None
+    assert find_env_file(tmp_path) is None

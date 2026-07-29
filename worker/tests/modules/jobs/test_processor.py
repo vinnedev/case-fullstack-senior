@@ -38,6 +38,8 @@ def test_processes_queued_job_to_done(db):
     result = db.execute("SELECT payload FROM job_results WHERE job_id = 1").fetchone()
     assert "empresa 1" in result["payload"]
     assert db.execute("SELECT job_quota FROM companies WHERE id = 1").fetchone()["job_quota"] == 9
+    audit = db.execute("SELECT event_type, actor FROM job_audit_events WHERE job_id = 1").fetchone()
+    assert audit == {"event_type": "completed", "actor": "system:worker"}
 
 
 def test_ignores_non_queued_jobs(db):
@@ -58,6 +60,7 @@ def test_failure_waits_for_manual_retry_with_error_recorded(db, monkeypatch):
     job = job_row(db)
     assert job["status"] == "failed" and job["attempts"] == 1
     assert "RuntimeError" in job["last_error"]
+    assert db.execute("SELECT event_type FROM job_audit_events WHERE job_id = 1").fetchone() == {"event_type": "failed"}
 
 
 def test_failure_marks_failed_after_max_attempts(db, monkeypatch):

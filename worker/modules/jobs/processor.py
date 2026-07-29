@@ -18,6 +18,7 @@ MAX_ATTEMPTS = 3
 LEASE_TIMEOUT_S = 30.0
 HEARTBEAT_INTERVAL_S = LEASE_TIMEOUT_S / 3
 WORKER_ID = str(uuid.uuid4())
+SYSTEM_ACTOR = "system:worker"
 type ConnectionFactory = Callable[[], AbstractContextManager[DictConnection]]
 
 
@@ -145,6 +146,7 @@ def recover_stale_jobs(conn: DictConnection, lease_timeout_s: float = LEASE_TIME
             (error, lease_timeout_s),
         ).fetchall()
         for job in stale:
+            _record_audit_event(conn, job, "failed")
             if job["attempts"] >= MAX_ATTEMPTS:
                 _send_to_dlq(conn, job, error)
     return len(stale)
@@ -206,6 +208,7 @@ def _finalize(conn: DictConnection, job: dict[str, Any]) -> str:
         ).rowcount
         if inserted:
             conn.execute("UPDATE companies SET job_quota = job_quota - 1 WHERE id = %s", (job["company_id"],))
+        _record_audit_event(conn, job, "completed")
         return "done"
 
 
@@ -232,6 +235,16 @@ def _send_to_dlq(conn: DictConnection, job: dict[str, Any], error: str) -> None:
     )
 
 
+def _record_audit_event(conn: DictConnection, job: dict[str, Any], event_type: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO job_audit_events (job_id, company_id, event_type, actor, trace_id)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (job["id"], job["company_id"], event_type, SYSTEM_ACTOR, job["trace_id"]),
+    )
+
+
 def _record_failure(conn: DictConnection, job: dict[str, Any], exc: Exception) -> tuple[str, float | None]:
     error = f"{type(exc).__name__}: {exc}"
     exhausted = job["attempts"] >= MAX_ATTEMPTS
@@ -252,6 +265,7 @@ def _record_failure(conn: DictConnection, job: dict[str, Any], exc: Exception) -
         ).fetchone()
         if row is None:
             return "cancelled", None
+        _record_audit_event(conn, job, "failed")
         if exhausted:
             _send_to_dlq(conn, job, error)
     return row["status"], None

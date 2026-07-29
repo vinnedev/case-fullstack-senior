@@ -148,6 +148,14 @@ def test_retry_failed_job(client, seeded, db):
     assert 4.0 <= float(delay) <= 6.0
 
 
+def test_retry_records_audit_in_job_detail(client, seeded):
+    client.post("/jobs/4/retry", headers=HEADERS)
+    detail = client.get("/jobs/4", headers=HEADERS).json()
+    assert detail["audit_events"][0]["event_type"] == "retry_requested"
+    assert detail["audit_events"][0]["actor"] == "1:user"
+    assert detail["audit_events"][0]["trace_id"]
+
+
 def test_retry_twice_conflicts(client, seeded):
     assert client.post("/jobs/4/retry", headers=HEADERS).status_code == 200
     assert client.post("/jobs/4/retry", headers=HEADERS).status_code == 409

@@ -65,6 +65,6 @@ def test_cancel_job_only_in_cancellable_states(service):
 
 def test_retry_job_respects_state_and_limit(service):
     with pytest.raises(RetryLimitError):
-        service.retry_job(1, 3)
+        service.retry_job(1, 3, "1:user")
     with pytest.raises(InvalidJobStateError):
-        service.retry_job(1, 1)
+        service.retry_job(1, 1, "1:user")

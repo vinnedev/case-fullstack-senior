@@ -67,7 +67,7 @@ class AuditEvent(ApiModel):
     """Evento de auditoria do ciclo de vida do job."""
 
     event_type: Literal["submitted", "cancelled", "retry_requested", "completed", "failed"]
-    actor: str = Field(description="Principal autenticado no formato canônico empresa:role")
+    actor: str = Field(description="Principal autenticado empresa:role ou ator de sistema")
     occurred_at: datetime = Field(description="Momento do evento (UTC)")
     trace_id: str | None = Field(description="Identificador de correlação da operação")
 

@@ -181,7 +181,12 @@ def cancel_job(
 def retry_job(job_id: int = JobId, *, ctx: AuthContext = Depends(current_ctx), service: JobsService = Depends(jobs_service)) -> JobRetried:
     event = current_event().add(company_id=ctx.company_id, job_id=job_id, action="retry")
     try:
-        job = service.retry_job(ctx.company_id, job_id)
+        job = service.retry_job(
+            ctx.company_id,
+            job_id,
+            f"{ctx.company_id}:{ctx.role}",
+            str(current_event().fields.get("request_id") or ""),
+        )
     except JobNotFoundError:
         raise HTTPException(404, "not found") from None
     except RetryLimitError as exc:

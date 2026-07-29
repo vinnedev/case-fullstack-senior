@@ -208,7 +208,7 @@ class JobsService:
         # A fila durável continua sendo a tabela jobs — o NOTIFY é só o sinal.
         self._conn.execute("SELECT pg_notify(%s, %s)", (JOBS_CHANNEL, str(job_id)))
 
-    def retry_job(self, company_id: int, job_id: int) -> dict[str, Any]:
+    def retry_job(self, company_id: int, job_id: int, requested_by: str, trace_id: str | None = None) -> dict[str, Any]:
         row = self._conn.execute(
             """
             UPDATE jobs
@@ -226,6 +226,7 @@ class JobsService:
             (job_id, company_id, MAX_ATTEMPTS),
         ).fetchone()
         if row is not None:
+            self._record_audit_event(job_id, company_id, "retry_requested", requested_by, trace_id)
             self._notify_queued(row["id"])
             return row
         current = self.get_job(company_id, job_id)

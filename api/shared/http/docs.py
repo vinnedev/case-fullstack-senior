@@ -3,8 +3,6 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
 
-# Mesmo arquivo servido pelo front (web/public/galaxies-icon.png): docs e app
-# compartilham a identidade visual, sem duas fontes de verdade divergirem.
 STATIC_PATH = Path(__file__).resolve().parents[2] / "static"
 FAVICON_PATH = STATIC_PATH / "favicon.png"
 GALAXIES_LOGO_PATH = STATIC_PATH / "galaxies-logo.png"
@@ -14,6 +12,7 @@ GALAXIES_LOGO_URL = "/galaxies-logo.png"
 SWAGGER_VERSION = "5.32.11"
 SWAGGER_JS = f"https://cdn.jsdelivr.net/npm/swagger-ui-dist@{SWAGGER_VERSION}/swagger-ui-bundle.js"
 SWAGGER_JS_SRI = "sha384-vfl/klfTFrIz5urj0HnhcXLAbzPdRHezizfy+XgFB6GqcKkhlk0lS3bIbyB39NLA"
+
 SWAGGER_CSS = f"https://cdn.jsdelivr.net/npm/swagger-ui-dist@{SWAGGER_VERSION}/swagger-ui.css"
 SWAGGER_CSS_SRI = "sha384-9Q2fpS+xeS4ffJy6CagnwoUl+4ldAYhOs9pgZuEKxypVModhmZFzeMlvVsAjf7uT"
 FONTS_CSS = (

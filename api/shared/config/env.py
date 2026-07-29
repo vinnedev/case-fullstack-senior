@@ -2,13 +2,10 @@ import os
 from pathlib import Path
 
 
-def find_env_file(start: Path | None = None) -> Path | None:
-    current = (start or Path(__file__).resolve().parent).resolve()
-    for directory in (current, *current.parents):
-        candidate = directory / ".env"
-        if candidate.is_file():
-            return candidate
-    return None
+def find_env_file(service_root: Path | None = None) -> Path | None:
+    root = (service_root or Path(__file__).resolve().parents[2]).resolve()
+    candidate = root / ".env"
+    return candidate if candidate.is_file() else None
 
 
 def parse_env_file(env_file: Path) -> dict[str, str]:
