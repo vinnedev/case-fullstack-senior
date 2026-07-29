@@ -1,28 +1,44 @@
 [project]
 name = "api"
 version = "0.1.0"
-description = "Add your description here"
+description = "Relay API"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "alembic>=1.18.5",
-    "sqlalchemy>=2.0",
+    "fastapi[standard]>=0.140.1",
+    "psycopg[binary]>=3.3",
+    "psycopg-pool>=3.2",
+    "pydantic>=2",
+    "uvicorn>=0.51.0",
+    "prometheus-client>=0.21",
 ]
 
 [tool.fastapi]
-    entrypoint = "main:app"
-
-dependencies = [
-    "fastapi[standard]>=0.140.1",
-    "psycopg>=3.3.4",
-    "uvicorn>=0.51.0",
-]
+entrypoint = "main:app"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "--import-mode=importlib"
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.9.1",
     "pytest>=9.1.1",
+    "ruff>=0.16.0",
+    "testcontainers>=4.15.0",
 ]
+
+[tool.ruff]
+line-length = 140
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# SVG do logo embutido em uma única linha
+"shared/http/galaxies_logo.py" = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header"]

@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from shared.config.env import find_env_file, load_env, parse_env_file, require_env
+from shared.config.env import find_env_file, load_env, parse_env_file
 
 
 @pytest.fixture(autouse=True)
@@ -24,7 +24,7 @@ def test_parse_env_file_ignores_comments_blank_and_malformed_lines(tmp_path):
 
 def test_parse_env_file_strips_quotes(tmp_path):
     env_file = tmp_path / ".env"
-    env_file.write_text("TEST_ENV_KEY=\"quoted\"\n")
+    env_file.write_text('TEST_ENV_KEY="quoted"\n')
     assert parse_env_file(env_file) == {"TEST_ENV_KEY": "quoted"}
 
 
@@ -58,13 +58,3 @@ def test_find_env_file_returns_none_when_absent(tmp_path):
     nested = tmp_path / "a"
     nested.mkdir()
     assert find_env_file(nested) is None
-
-
-def test_require_env_returns_value(monkeypatch):
-    monkeypatch.setenv("TEST_ENV_KEY", "value")
-    assert require_env("TEST_ENV_KEY") == "value"
-
-
-def test_require_env_raises_when_missing():
-    with pytest.raises(RuntimeError, match="TEST_ENV_KEY"):
-        require_env("TEST_ENV_KEY")

@@ -33,10 +33,3 @@ def load_env(env_file: Path | None = None) -> dict[str, str]:
     for key, value in values.items():
         os.environ.setdefault(key, value)
     return values
-
-
-def require_env(key: str) -> str:
-    value = os.environ.get(key)
-    if not value:
-        raise RuntimeError(f"missing required environment variable: {key}")
-    return value
