@@ -104,7 +104,8 @@ acessa `web:5173` e `api:8000/docs` de fora, como um usuário faria, e reporta
 ## Logs (Loki + Promtail)
 
 > **Ruído de scrape:** com `LOG_SUPPRESS_PROBE_ROUTES=true` (configurável pelo
-> `.env` do projeto), as requests de `/metrics` e das rotas de health somem do
+> `api/.env` em execução local ou variável exportada para o Compose), as
+> requests de `/metrics` e das rotas de health somem do
 > stream quando respondem OK. São **dois canais** e a flag governa os dois: o
 > wide event JSON (filtrado no middleware) e o access log em texto do uvicorn
 > (filtrado no logger `uvicorn.access` — sem isso, linhas como

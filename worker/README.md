@@ -7,8 +7,12 @@ acordado e mantém polling de 30 segundos como fallback.
 ## Executar
 
 ```bash
+cp .env.example .env
 uv run main.py
 ```
+
+`DATABASE_URL` é obrigatória. O worker lê apenas `worker/.env`; migrations são
+responsabilidade exclusiva da API.
 
 ## Testar
 
