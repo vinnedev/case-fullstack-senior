@@ -63,7 +63,10 @@ def test_drain_gives_up_after_timeout(run):
 class TestProbeRouteLogSuppression:
     """Flag LOG_SUPPRESS_PROBE_ROUTES: tira ruído do Grafana sem esconder falha."""
 
-    @pytest.mark.parametrize("path", ["/health", "/healthz", "/ready", "/readyz", "/live", "/livez", "/metrics", "/metrics/"])
+    @pytest.mark.parametrize(
+        "path",
+        ["/health", "/healthz", "/ready", "/readyz", "/live", "/livez", "/metrics", "/metrics/"],
+    )
     def test_probe_routes_are_suppressed_when_flag_on(self, path):
         assert main.should_emit_request_log(path, suppress_probe_routes=True) is False
 
@@ -71,7 +74,7 @@ class TestProbeRouteLogSuppression:
     def test_nothing_is_suppressed_when_flag_off(self, path):
         assert main.should_emit_request_log(path, suppress_probe_routes=False) is True
 
-    @pytest.mark.parametrize("path", ["/jobs", "/jobs/1", "/admin/dlq", "/docs", "/healthcheck"])
+    @pytest.mark.parametrize("path", ["/jobs", "/jobs/1", "/admin/dlq", "/healthcheck", "/docs", "/openapi.json", "/favicon.png"])
     def test_business_routes_are_never_suppressed(self, path):
         assert main.should_emit_request_log(path, suppress_probe_routes=True) is True
 

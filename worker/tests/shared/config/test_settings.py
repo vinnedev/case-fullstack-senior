@@ -25,7 +25,7 @@ def test_rejects_invalid_values(monkeypatch):
     with pytest.raises(ValidationError):
         Settings(database_url="postgresql://x", db_pool_size=0)
     with pytest.raises(ValidationError):
-        Settings(database_url="postgresql://x", db_pool_size=1, db_max_overflow=0)
+        Settings(database_url="postgresql://x", db_pool_size=2, db_max_overflow=0)
     with pytest.raises(ValidationError):
         Settings(database_url="postgresql://x", log_success_sample_rate=1.5)
     with pytest.raises(ValidationError):

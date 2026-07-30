@@ -24,11 +24,29 @@ def run_migrations(database_url: str | None = None, directory: Path | None = Non
     directory = directory or migrations_dir()
     applied: list[str] = []
     with psycopg.connect(database_url or get_settings().database_url) as conn:
-        for migration in pending_migrations(conn, directory):
-            conn.execute(cast(LiteralString, migration.read_text()))
-            conn.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (migration.stem,))
+        conn.execute("SELECT pg_advisory_lock(hashtext('relay_migrations'))")
+        conn.commit()
+        try:
+            for migration in pending_migrations(conn, directory):
+                sql = migration.read_text()
+                if "-- migration: non-transactional" in sql:
+                    conn.commit()
+                    conn.autocommit = True
+                    try:
+                        conn.execute(cast(LiteralString, sql))
+                    finally:
+                        conn.autocommit = False
+                else:
+                    conn.execute(cast(LiteralString, sql))
+                conn.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (migration.stem,))
+                conn.commit()
+                applied.append(migration.stem)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(hashtext('relay_migrations'))")
             conn.commit()
-            applied.append(migration.stem)
     return applied
 
 

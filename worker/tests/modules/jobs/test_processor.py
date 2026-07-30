@@ -126,6 +126,7 @@ def test_cancelled_mid_flight_rolls_back_and_stops_current_processing(db, test_d
 
     with psycopg.connect(test_database) as other:
         other.execute("UPDATE jobs SET status = 'cancelled' WHERE id = %s", (1,))
+        other.execute("SELECT pg_notify('jobs_cancelled', '1')")
         other.commit()
 
     assert stopped.wait(2)

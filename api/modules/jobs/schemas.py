@@ -109,7 +109,14 @@ class JobCreated(ApiModel):
     """Job criado — ou o job original, em replay da mesma `Idempotency-Key`."""
 
     id: PositiveId = Field(description="Identificador do job criado")
-    status: Literal["queued"] = Field(description="Sempre `queued` na criação", examples=["queued"])
+    status: JobStatus = Field(
+        description=(
+            "`queued` quando o job acabou de ser criado. No replay de uma "
+            "`Idempotency-Key` já usada, devolve o status atual do job original "
+            "(que pode já ter sido processado)."
+        ),
+        examples=["queued"],
+    )
 
 
 class JobCancelled(ApiModel):

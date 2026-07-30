@@ -17,7 +17,7 @@ services:
     environment:
       DATABASE_URL: postgresql://relay:relay@db:5432/relay
       CORS_ORIGINS: http://localhost:5173
-      LOG_SUPPRESS_PROBE_ROUTES: ${LOG_SUPPRESS_PROBE_ROUTES:-false}
+      LOG_SUPPRESS_PROBE_ROUTES: ${LOG_SUPPRESS_PROBE_ROUTES:-true}
       MIGRATIONS_DIR: /app/db_migrations
       PYTHONUNBUFFERED: "1"
     volumes:
@@ -37,6 +37,7 @@ services:
     environment:
       DATABASE_URL: postgresql://relay:relay@db:5432/relay
       METRICS_PORT: "9100"
+      JOB_SIMULATED_WORK_S: ${JOB_SIMULATED_WORK_S:-1.0}
       PYTHONUNBUFFERED: "1"
     restart: on-failure
     depends_on:

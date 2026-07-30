@@ -369,12 +369,14 @@ class TestR12OpenApiContract:
         schemas = client.get("/openapi.json").json()["components"]["schemas"]
         domain = {"queued", "running", "done", "failed", "cancelled"}
         # cada modelo declara o conjunto exato que aquela operação pode devolver:
-        # os de leitura, o domínio inteiro; os de mutação, o único valor possível
+        # leituras e o create (cujo replay de Idempotency-Key devolve o job
+        # original em qualquer estado), o domínio inteiro; cancel/retry, o
+        # único valor possível
         for name, expected in (
             ("JobSummary", domain),
             ("JobDetail", domain),
             ("AdminJob", domain),
-            ("JobCreated", {"queued"}),
+            ("JobCreated", domain),
             ("JobCancelled", {"cancelled"}),
             ("JobRetried", {"queued"}),
         ):

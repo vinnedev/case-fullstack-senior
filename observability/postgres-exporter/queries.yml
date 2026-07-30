@@ -1,5 +1,7 @@
 pg_jobs:
-  query: "SELECT status, count(*) AS total FROM jobs GROUP BY status"
+  # LEFT JOIN contra a lista fixa de status: garante série com valor 0 para
+  # status sem nenhum job (sem isso o painel mostra "No data" com fila vazia)
+  query: "SELECT s.status, count(j.id) AS total FROM unnest(ARRAY['queued','running','done','failed','cancelled']) AS s(status) LEFT JOIN jobs j ON j.status = s.status GROUP BY s.status"
   master: true
   metrics:
     - status:

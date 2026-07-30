@@ -121,6 +121,7 @@ def create_job(
     ],
     ctx: AuthContext = Depends(current_ctx),
     service: JobsService = Depends(jobs_service),
+    conn: DictConnection = Depends(get_db),
 ) -> JobCreated:
     event = current_event().add(company_id=ctx.company_id, job_kind=body.kind, idempotency_key=idempotency_key)
     try:
@@ -137,9 +138,11 @@ def create_job(
         event.add(concurrency_limit=exc.limit, jobs_running=exc.running)
         raise HTTPException(429, "limite de jobs concorrentes atingido") from exc
     event.add(job_id=job["id"], idempotency_replay=not created)
+    response = JobCreated.model_validate(job)
+    conn.commit()
     if created:
         jobs_created_total.inc()
-    return JobCreated.model_validate(job)
+    return response
 
 
 @router.post(
@@ -151,7 +154,11 @@ def create_job(
     },
 )
 def cancel_job(
-    job_id: int = JobId, *, ctx: AuthContext = Depends(current_ctx), service: JobsService = Depends(jobs_service)
+    job_id: int = JobId,
+    *,
+    ctx: AuthContext = Depends(current_ctx),
+    service: JobsService = Depends(jobs_service),
+    conn: DictConnection = Depends(get_db),
 ) -> JobCancelled:
     event = current_event().add(company_id=ctx.company_id, job_id=job_id, action="cancel")
     try:
@@ -167,7 +174,9 @@ def cancel_job(
         event.add(job_status=exc.status)
         raise HTTPException(409, f"job em estado '{exc.status}' não pode ser cancelado") from exc
     event.add(job_status=job["status"])
-    return JobCancelled.model_validate(job)
+    response = JobCancelled.model_validate(job)
+    conn.commit()
+    return response
 
 
 @router.post(
@@ -178,7 +187,13 @@ def cancel_job(
         409: {"description": "Job não está em failed ou atingiu o máximo de tentativas"},
     },
 )
-def retry_job(job_id: int = JobId, *, ctx: AuthContext = Depends(current_ctx), service: JobsService = Depends(jobs_service)) -> JobRetried:
+def retry_job(
+    job_id: int = JobId,
+    *,
+    ctx: AuthContext = Depends(current_ctx),
+    service: JobsService = Depends(jobs_service),
+    conn: DictConnection = Depends(get_db),
+) -> JobRetried:
     event = current_event().add(company_id=ctx.company_id, job_id=job_id, action="retry")
     try:
         job = service.retry_job(
@@ -196,4 +211,6 @@ def retry_job(job_id: int = JobId, *, ctx: AuthContext = Depends(current_ctx), s
         event.add(job_status=exc.status)
         raise HTTPException(409, f"job em estado '{exc.status}' não pode ser reprocessado") from exc
     event.add(job_status=job["status"], attempts=job["attempts"])
-    return JobRetried.model_validate(job)
+    response = JobRetried.model_validate(job)
+    conn.commit()
+    return response

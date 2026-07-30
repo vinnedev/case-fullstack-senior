@@ -12,6 +12,7 @@ from shared.db.pool import DictConnection
 
 MAX_ATTEMPTS = 3
 JOBS_CHANNEL = "jobs_queued"
+CANCELLATIONS_CHANNEL = "jobs_cancelled"
 
 
 def _escape_like(pattern: str | None) -> str | None:
@@ -41,13 +42,12 @@ class JobsService:
         search = _escape_like(search)
         return self._conn.execute(
             """
-            SELECT j.id, j.kind, j.status, j.created_at, count(r.id) AS result_count
+            SELECT j.id, j.kind, j.status, j.created_at,
+                   (SELECT count(*) FROM job_results r WHERE r.job_id = j.id) AS result_count
             FROM jobs j
-            LEFT JOIN job_results r ON r.job_id = j.id
             WHERE j.company_id = %(company_id)s
               AND (%(status)s::text IS NULL OR j.status = %(status)s)
               AND (%(search)s::text IS NULL OR j.kind ILIKE '%%' || %(search)s || '%%')
-            GROUP BY j.id
             ORDER BY j.created_at DESC, j.id DESC
             LIMIT %(limit)s OFFSET %(offset)s
             """,
@@ -175,7 +175,8 @@ class JobsService:
         ).fetchone()
         if job is None:
             # corrida entre duas requests com a mesma chave: a outra venceu, devolve o job dela
-            return _require_row(self._find_by_idempotency_key(company_id, idempotency_key)), False
+            winner = _require_row(self._find_by_idempotency_key(company_id, idempotency_key))
+            return winner, False
         if submitted_by is not None:
             self._record_audit_event(job["id"], company_id, "submitted", submitted_by, trace_id)
         self._notify_queued(job["id"])
@@ -199,6 +200,7 @@ class JobsService:
         ).fetchone()
         if row is not None:
             self._record_audit_event(job_id, company_id, "cancelled", cancelled_by, trace_id)
+            self._conn.execute("SELECT pg_notify(%s, %s)", (CANCELLATIONS_CHANNEL, str(job_id)))
             return row
         current = self.get_job(company_id, job_id)
         raise InvalidJobStateError(current["status"])

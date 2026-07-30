@@ -5,6 +5,8 @@ from contextlib import AbstractContextManager, contextmanager
 from threading import Event, Thread
 from typing import Any
 
+from modules.jobs.listener import wait_for_wakeup
+from shared.config.settings import get_settings
 from shared.db.pool import DictConnection
 from shared.logging.wide_event import start_event
 from shared.observability.worker_metrics import (
@@ -19,6 +21,7 @@ LEASE_TIMEOUT_S = 30.0
 HEARTBEAT_INTERVAL_S = LEASE_TIMEOUT_S / 3
 WORKER_ID = str(uuid.uuid4())
 SYSTEM_ACTOR = "system:worker"
+CANCELLATIONS_CHANNEL = "jobs_cancelled"
 type ConnectionFactory = Callable[[], AbstractContextManager[DictConnection]]
 
 
@@ -56,13 +59,17 @@ def cancellation_monitor(
 
     def monitor() -> None:
         with factory() as monitor_conn:
-            while not stopped.wait(interval_s):
-                with monitor_conn.transaction():
-                    row = monitor_conn.execute(
-                        "SELECT status FROM jobs WHERE id = %s",
-                        (job["id"],),
-                    ).fetchone()
-                if row is not None and row["status"] == "cancelled":
+            monitor_conn.execute(f"LISTEN {CANCELLATIONS_CHANNEL}")
+            monitor_conn.commit()
+            # O SELECT posterior ao LISTEN cobre um cancelamento entre a abertura
+            # da conexão e a ativação efetiva da assinatura.
+            row = monitor_conn.execute("SELECT status FROM jobs WHERE id = %s", (job["id"],)).fetchone()
+            monitor_conn.commit()
+            if row is not None and row["status"] == "cancelled":
+                token.cancel()
+                return
+            while not stopped.is_set():
+                if wait_for_wakeup(monitor_conn, timeout=interval_s):
                     token.cancel()
                     return
 
@@ -72,7 +79,7 @@ def cancellation_monitor(
         yield token
     finally:
         stopped.set()
-        thread.join()
+        thread.join(timeout=interval_s + 1)
 
 
 def _renew_lease(factory: ConnectionFactory, job: dict[str, Any]) -> None:
@@ -206,9 +213,11 @@ def _finalize(conn: DictConnection, job: dict[str, Any]) -> str:
             "INSERT INTO job_results (job_id, payload) VALUES (%s, %s) ON CONFLICT (job_id) DO NOTHING",
             (job["id"], f"resultado sensível da empresa {job['company_id']}"),
         ).rowcount
-        if inserted:
-            conn.execute("UPDATE companies SET job_quota = job_quota - 1 WHERE id = %s", (job["company_id"],))
         _record_audit_event(conn, job, "completed")
+        if inserted:
+            # a linha da company é o ponto quente do tenant: todos os finalizes
+            # serializam nela, então o lock precisa ser o último antes do commit
+            conn.execute("UPDATE companies SET job_quota = job_quota - 1 WHERE id = %s", (job["company_id"],))
         return "done"
 
 
@@ -273,9 +282,11 @@ def _record_failure(conn: DictConnection, job: dict[str, Any], exc: Exception) -
 
 def _execute(conn: DictConnection, job: dict[str, Any]) -> None:
     token = job["cancel_token"]
-    for _ in range(10):
-        token.raise_if_cancelled()
-        time.sleep(0.1)
+    work_s = get_settings().job_simulated_work_s
+    if work_s > 0:
+        for _ in range(10):
+            token.raise_if_cancelled()
+            time.sleep(work_s / 10)
     token.raise_if_cancelled()
     company = conn.execute("SELECT id FROM companies WHERE id = %s", (job["company_id"],)).fetchone()
     if company is None:
