@@ -9,7 +9,7 @@ mkdir -p "$RESULTS_DIR"
 
 WORKERS="${WORKERS:-1}"
 echo ">> subindo db, api, worker (x$WORKERS) e exporters"
-docker compose up -d --build --scale worker="$WORKERS" db api worker postgres-exporter prometheus
+docker compose --profile obs up -d --build --scale worker="$WORKERS" db api worker postgres-exporter prometheus
 
 echo ">> aguardando api saudável"
 until curl -sf http://localhost:8000/health > /dev/null; do sleep 1; done
