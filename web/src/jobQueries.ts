@@ -26,6 +26,12 @@ export function shouldPollActiveJobs(status: JobStatus | undefined): boolean {
   return status !== undefined && ACTIVE_JOB_STATUSES.has(status);
 }
 
+export function isPaginationNeeded(page: number, pageSize: number, total: number): boolean {
+  // Fora da primeira página os controles são necessários para voltar,
+  // mesmo que o total tenha diminuído (ex.: filtro aplicado ou item removido).
+  return page > 0 || total > pageSize;
+}
+
 export function getJobMutationInvalidationKeys({ auth, jobId }: JobMutationVariables): readonly JobMutationCacheKey[] {
   return [jobQueryKeys.list(auth), jobQueryKeys.detail(auth, jobId), jobQueryKeys.result(auth, jobId)];
 }

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   getJobMutationInvalidationKeys,
+  isPaginationNeeded,
   invalidateJobMutationCaches,
   jobQueryKeys,
   shouldPollActiveJobs,
@@ -148,4 +149,12 @@ test("faz polling do detalhe somente enquanto o job estiver ativo", () => {
   assert.equal(shouldPollActiveJobs("failed"), false);
   assert.equal(shouldPollActiveJobs("cancelled"), false);
   assert.equal(shouldPollActiveJobs(undefined), false);
+});
+
+test("paginação só aparece quando há mais itens que a página comporta", () => {
+  assert.equal(isPaginationNeeded(0, 10, 8), false); // tudo cabe numa página
+  assert.equal(isPaginationNeeded(0, 10, 10), false); // exatamente uma página
+  assert.equal(isPaginationNeeded(0, 10, 11), true); // transborda para a página 2
+  assert.equal(isPaginationNeeded(2, 10, 5), true); // fora da 1ª página precisa voltar
+  assert.equal(isPaginationNeeded(0, 5, 0), false); // lista vazia
 });
