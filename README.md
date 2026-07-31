@@ -38,7 +38,7 @@ Serviços disponíveis:
 | Web | http://localhost:5173 | Interface da aplicação |
 | API | http://localhost:8000 | API HTTP |
 | OpenAPI | http://localhost:8000/docs | Contrato interativo da API |
-| PostgreSQL | `localhost:5433` | Banco local (`relay` / `relay`) |
+| PostgreSQL | `localhost:5432` | Banco local (`relay` / `relay`) |
 | Grafana | http://localhost:3000 | Dashboards — profile `obs` |
 | Prometheus | http://localhost:9090 | Targets, métricas e regras — profile `obs` |
 
@@ -91,7 +91,6 @@ Mudanças de contrato visíveis para quem seguir os comandos do [case original](
 
 | Diferença | Motivo |
 |---|---|
-| PostgreSQL exposto em `localhost:5433` (não 5432) | Evita conflito com Postgres local; dentro do Compose continua 5432 — os comandos `docker compose exec -T db psql ...` do case funcionam sem alteração |
 | `POST /jobs` aceita `Idempotency-Key` opcional | O curl original (`-d '{"kind":"report"}'`) segue funcionando; com o header, replays devolvem o job original e payload divergente responde 409 |
 | `GET /jobs` é paginado (default 50, máx 200) | Resposta continua sendo o array plano original; o total vem no header `X-Total-Count` |
 

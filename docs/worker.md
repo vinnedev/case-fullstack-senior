@@ -123,6 +123,6 @@ registrados pela API com o principal autenticado.
 ## Executar e testar
 
 ```bash
-uv run main.py     # local (usa worker/.env; Postgres em localhost:5433)
+uv run main.py     # local (usa worker/.env; Postgres em localhost:5432)
 uv run pytest      # testcontainers: claim, falha, retry, cancel mid-flight, NOTIFY
 ```
