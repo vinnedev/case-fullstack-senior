@@ -1,12 +1,14 @@
 import json
+from collections.abc import Generator
 from contextlib import contextmanager
 from threading import Event, Thread
+from typing import cast
 
 import pytest
 
 from modules.jobs import processor
 from modules.jobs.processor import process_next
-from shared.db.pool import connect_dict
+from shared.db.pool import DictConnection, connect_dict
 
 
 @pytest.fixture(autouse=True)
@@ -126,7 +128,6 @@ def test_cancelled_mid_flight_rolls_back_and_stops_current_processing(db, test_d
     import psycopg
 
     with psycopg.connect(test_database) as other:
-        # espelha o cancel da API: além do status, limpa worker_id e locked_at
         other.execute("UPDATE jobs SET status = 'cancelled', worker_id = NULL, locked_at = NULL WHERE id = %s", (1,))
         other.execute("SELECT pg_notify('jobs_cancelled', '1')")
         other.commit()
@@ -213,28 +214,33 @@ def test_initially_cancelled_job_never_enters_execute(db, test_database, monkeyp
     assert job_row(db)["status"] == "cancelled"
 
 
-def test_monitor_readiness_timeout_fails_claim_and_returns_without_execute(db, monkeypatch):
+def test_monitor_readiness_timeout_fails_claim_and_stops_worker(db, monkeypatch):
     seed(db)
     factory_entered = Event()
     release_factory = Event()
     factory_exited = Event()
     execute_called = Event()
     completed = Event()
+    failures = []
 
     @contextmanager
-    def blocked_factory():
+    def blocked_factory() -> Generator[DictConnection, None, None]:
         factory_entered.set()
         assert release_factory.wait(2)
         factory_exited.set()
-        yield
+        yield cast(DictConnection, None)
 
     monkeypatch.setattr(processor, "_execute", lambda _conn, _job: execute_called.set())
     monkeypatch.setattr(processor, "CANCELLATION_MONITOR_STARTUP_TIMEOUT_S", 0.01)
     monkeypatch.setattr(processor, "CANCELLATION_MONITOR_STOP_TIMEOUT_S", 0.01)
 
     def run_worker():
-        process_next(db, heartbeat_factory=blocked_factory)
-        completed.set()
+        try:
+            process_next(db, heartbeat_factory=blocked_factory)
+        except processor.FatalCancellationMonitorError as exc:
+            failures.append(exc)
+        finally:
+            completed.set()
 
     worker = Thread(target=run_worker)
     worker.start()
@@ -245,16 +251,16 @@ def test_monitor_readiness_timeout_fails_claim_and_returns_without_execute(db, m
     assert factory_exited.wait(2)
     job = job_row(db)
     assert execute_called.is_set() is False
+    assert len(failures) == 1
     assert job["status"] == "failed"
-    assert "CancellationMonitorTimeoutError" in job["last_error"]
+    assert "FatalCancellationMonitorError" in job["last_error"]
 
 
-def test_monitor_shutdown_timeout_closes_connection_and_records_cause(db, test_database):
+def test_monitor_shutdown_timeout_fails_current_job_and_stops_worker(db, test_database, monkeypatch):
     seed(db)
     polling_started = Event()
     release_poll = Event()
     poll_exited = Event()
-    job = {"id": 1}
 
     def stalled_notify(_conn, _job_id, timeout):
         polling_started.set()
@@ -264,19 +270,16 @@ def test_monitor_shutdown_timeout_closes_connection_and_records_cause(db, test_d
             poll_exited.set()
         return False
 
-    original_notify = processor._cancellation_arrived
-    processor._cancellation_arrived = stalled_notify
+    monkeypatch.setattr(processor, "_cancellation_arrived", stalled_notify)
+    monkeypatch.setattr(processor, "_execute", lambda _conn, _job: polling_started.wait(2))
     try:
-        with processor.cancellation_monitor(
-            job,
-            lambda: connect_dict(test_database),
-            stop_timeout_s=0.01,
-        ) as token:
-            assert polling_started.wait(2)
-        assert token.is_cancelled() is True
-        assert isinstance(job["cancellation_monitor_error"], processor.CancellationMonitorTimeoutError)
+        monkeypatch.setattr(processor, "CANCELLATION_MONITOR_STOP_TIMEOUT_S", 0.01)
+        with pytest.raises(processor.FatalCancellationMonitorError, match="fechamento forçado"):
+            process_next(db, heartbeat_factory=lambda: connect_dict(test_database))
+        job = job_row(db)
+        assert job["status"] == "failed"
+        assert "FatalCancellationMonitorError" in job["last_error"]
     finally:
-        processor._cancellation_arrived = original_notify
         release_poll.set()
     assert poll_exited.wait(2)
 
@@ -316,7 +319,7 @@ def test_cancel_notify_for_other_job_is_ignored(db, test_database):
     seed(db)
     job = {"id": 1}
     with processor.cancellation_monitor(job, lambda: connect_dict(test_database), interval_s=0.02) as token:
-        Event().wait(0.2)  # espera a assinatura do monitor ativar
+        Event().wait(0.2)
         with psycopg.connect(test_database) as other:
             other.execute("SELECT pg_notify('jobs_cancelled', '999')")
             other.commit()
@@ -344,7 +347,6 @@ def test_monitor_unlistens_before_returning_connection(db, test_database):
 
     with processor.cancellation_monitor({"id": 1}, factory, interval_s=0.02):
         Event().wait(0.1)
-    # a "devolução ao pool" não pode carregar assinatura nem notificações velhas
     assert reused.execute("SELECT pg_listening_channels()").fetchall() == []
     reused.close()
 
@@ -378,7 +380,6 @@ def test_heartbeat_lease_loss_trips_cancel_token(db, test_database):
 
 
 def test_api_style_cancel_is_acknowledged_not_logged_as_failure(db, capsys, monkeypatch):
-    # o cancel da API limpa worker_id; o ack precisa reconhecer pelo status
     seed(db)
 
     def cancel_like_api(conn, job):
@@ -409,7 +410,7 @@ def test_seconds_until_next_attempt(db):
     assert pending is not None and 3.0 < pending <= 5.0
     db.execute("UPDATE jobs SET next_attempt_at = now() - interval '1 second' WHERE id = 1")
     db.commit()
-    assert processor.seconds_until_next_attempt(db) is None  # já elegível: o claim resolve
+    assert processor.seconds_until_next_attempt(db) is None
 
 
 def test_trace_id_flows_into_processing_event(db, capsys):
