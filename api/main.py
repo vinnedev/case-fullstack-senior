@@ -76,10 +76,12 @@ recursos de outro tenant respondem `404`.
 
 ## Idempotência
 
-O header **`Idempotency-Key`** no `POST /jobs` é **obrigatório** (`422` se ausente):
-repetir a mesma chave (por empresa) devolve o job original em vez de criar outro —
-proteção contra duplo-clique e retry de rede. Cancel e retry são
-idempotentes por estado: a segunda chamada responde `409`.
+O header **`Idempotency-Key`** no `POST /jobs` é **opcional, recomendado**:
+repetir a mesma chave (por empresa) com o mesmo payload devolve o job original em
+vez de criar outro — proteção contra duplo-clique e retry de rede. A mesma chave
+com payload diferente responde `409`. Sem o header, a API gera uma chave própria
+(sem proteção contra reenvio). Cancel e retry são idempotentes por estado: a
+segunda chamada responde `409`.
 
 ## Erros
 
@@ -91,6 +93,11 @@ idempotentes por estado: a segunda chamada responde `409`.
 | `409` | Transição de estado inválida (cancelar `done`, retry sem ser `failed`, máximo de tentativas) |
 | `422` | Validação: tipos/formatos/faixas errados, com o campo apontado em `detail` |
 | `429` | Limite de jobs concorrentes da empresa atingido |
+| `503` | Servidor encerrando (graceful shutdown) — repita em outra réplica |
+
+Toda resposta carrega o header **`X-Request-ID`** — o mesmo id gravado como
+`trace_id` do job quando a operação cria/cancela/reprocessa. Em erros que não
+tocam job (`401`/`422`/`429`), é o elo entre a resposta e o log da API.
 """
 
 TAGS_METADATA = [
@@ -134,10 +141,11 @@ def health() -> dict[str, str]:
 async def request_lifecycle_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     if not await shutdown.request_started():
         return JSONResponse({"detail": "servidor encerrando"}, status_code=503, headers={"Connection": "close"})
+    request_id = str(uuid.uuid4())
     event = start_event(
         SERVICE,
         "http_request",
-        request_id=str(uuid.uuid4()),
+        request_id=request_id,
         http_method=request.method,
         http_path=request.url.path,
     )
@@ -146,6 +154,9 @@ async def request_lifecycle_middleware(request: Request, call_next: Callable[[Re
     http_requests_in_flight.inc()
     try:
         response = await call_next(request)
+        # Correlação para o cliente: em respostas que não criam job (401/422/
+        # 429...) este header é o único elo entre a reclamação e o log.
+        response.headers["X-Request-ID"] = request_id
         status = response.status_code
         event.add(http_status=status)
         if status >= 500:
