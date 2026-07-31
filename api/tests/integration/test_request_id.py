@@ -1,8 +1,11 @@
 """X-Request-ID: correlação resposta ↔ log ↔ trace_id do job."""
 
+import json
 import uuid
 
 import pytest
+
+import main
 
 HEADERS = {"X-Auth": "1:user"}
 
@@ -30,7 +33,7 @@ def test_success_response_carries_request_id(client, seeded):
 @pytest.mark.parametrize(
     ("headers", "expected_status"),
     [
-        (None, 401),  # sem X-Auth: erro que não toca job — o header é o único elo com o log
+        (None, 401),
         (HEADERS, 404),
     ],
 )
@@ -54,3 +57,22 @@ def test_each_request_gets_a_fresh_request_id(client, seeded):
     first = client.get("/jobs", headers=HEADERS).headers["X-Request-ID"]
     second = client.get("/jobs", headers=HEADERS).headers["X-Request-ID"]
     assert first != second
+
+
+def test_shutdown_503_carries_and_logs_request_id(client, capsys):
+    main.shutdown.shutting_down = True
+
+    origin = "http://localhost:5173"
+    response = client.get("/jobs", headers={**HEADERS, "Origin": origin})
+
+    assert response.status_code == 503
+    assert response.headers["Access-Control-Allow-Origin"] == origin
+    exposed_headers = {header.strip().lower() for header in response.headers["Access-Control-Expose-Headers"].split(",")}
+    assert "x-request-id" in exposed_headers
+    request_id = response.headers["X-Request-ID"]
+    assert _is_uuid(request_id)
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    event = next(item for item in events if item.get("event") == "http_request")
+    assert event["request_id"] == request_id
+    assert event["http_status"] == 503
+    assert event["shutdown_rejected"] is True
