@@ -71,7 +71,7 @@ revisável e testável antes de discutir capacidade.
 
 - **Observabilidade operacional** (`observability/`): cAdvisor coleta CPU/memória/rede por container. O pool da API publica utilização e requests aguardando conexão. `pg_stat_statements` com `track_io_timing` identifica queryid, tempo total/médio e parcela de leitura/escrita. O dashboard Performance Investigation consulta SQL ativas e bloqueios. Regras Prometheus provisionam SLOs e alertas de p99, disponibilidade, backlog, pool, conexões e deadlocks. Labels de query continuam limitados a `queryid`, e o texto completo só é consultado na tabela interna do Grafana para evitar cardinalidade no Prometheus.
 
-- **Feature B (retry idempotente)**: toda execução que falha fica em `failed`. `POST /jobs/{id}/retry` faz `UPDATE ... WHERE status='failed' AND attempts < 3 RETURNING` e agenda `next_attempt_at` com backoff exponencial (5s, depois 10s). Duplo-clique: o segundo UPDATE não casa linha e responde 409. A terceira falha vai para a DLQ. Idempotência de resultado/quota é a mesma do sintoma 2 (UNIQUE + ON CONFLICT + quota amarrada à transição). Verificação: testes de duplo retry, limite de tentativas, backoff e cross-tenant.
+- **Feature B (retry idempotente)**: toda execução que falha fica em `failed`. `POST /jobs/{id}/retry` faz `UPDATE ... WHERE status='failed' AND attempts < 3 RETURNING` e agenda `next_attempt_at` com backoff exponencial (5s, depois 10s). Duplo-clique: o segundo UPDATE não casa linha e responde 409. A terceira falha vai para a DLQ. Idempotência de resultado/quota é a mesma do sintoma 2 (UNIQUE + ON CONFLICT + quota amarrada à transição). A migration `0012` separa jobs imediatos e agendados em índices parciais, usados pelo claim e pelo cálculo do próximo wake-up; os índices são criados/removidos com DDL concorrente e recuperação de build interrompido. Verificação: testes de duplo retry, limite de tentativas, backoff, cross-tenant e `EXPLAIN` real com 10 mil retries futuros.
 
 - **Graceful shutdown** (`shared/http/graceful_shutdown.py` + lifespan): para de aceitar (503), drena requests em andamento com timeout e fecha o pool. Testado com testes async dedicados.
 
@@ -79,13 +79,13 @@ revisável e testável antes de discutir capacidade.
 
 - **CI no GitHub Actions** (`.github/workflows/ci.yml`): pipeline em cada push/PR. Para api e worker, em matriz: lint (`ruff check` e `ruff format --check`), type check (`pyright`) e os testes com testcontainers. Para o front: `tsc --noEmit`, testes e build. Por fim, `docker compose build` valida que as imagens continuam construindo. A entrega pedia um repositório pronto para review, então o CI prova que tudo passa fora da minha máquina.
 
-- **Frontend**: `api.ts` tipado com `ApiError` extraindo o `detail` do backend (409/429 deixam de ser silêncio, antes mascaravam até incidente de segurança). `JobsPanel` tipado com botões de cancelar/retry coerentes com o estado e feedback de erro visível. `SubmitButton` com disable durante o submit e `Idempotency-Key` por intenção. Polling adaptativo: 1s só com job ativo, desligado em repouso (o polling fixo de 1s combinado com o antigo N+1 era DoS acidental). CORS restrito a allowlist por env (`CORS_ORIGINS`) com métodos e headers mínimos, em vez de `*`. Por fim, UI reestilizada com a identidade da Galaxies (paleta azul, ícone, cards, badges por status) e sistema de toasts para todo feedback de ação, sem lib de UI, só CSS.
+- **Frontend**: `api.ts` tipado com `ApiError` extraindo o `detail` do backend (409/429 deixam de ser silêncio, antes mascaravam até incidente de segurança). `JobsPanel` tipado com botões de cancelar/retry coerentes com o estado e feedback de erro visível. `SubmitButton` com disable durante o submit e `Idempotency-Key` por intenção. Polling adaptativo: 1s só com job ativo, desligado em repouso (o polling fixo de 1s combinado com o antigo N+1 era DoS acidental). Troca de tenant e redução do total corrigem a página corrente antes de renderizar, e falhas das queries administrativas aparecem como erro explícito sem descartar dados válidos do cache durante um refetch. CORS restrito a allowlist por env (`CORS_ORIGINS`) com métodos e headers mínimos, em vez de `*`; `X-Request-ID` fica exposto ao navegador inclusive no 503 de shutdown. Por fim, UI reestilizada com a identidade da Galaxies (paleta azul, ícone, cards, badges por status) e sistema de toasts para todo feedback de ação, sem lib de UI, só CSS.
 
 ### Bateria adversarial: quebrando as próprias regras
 
 Depois de tudo pronto, escrevi uma suíte cujo objetivo é **falhar**: cada teste
 tenta violar uma regra de negócio com input errado, faltando ou malicioso
-(`api/tests/integration/test_business_rules_break.py`, 248 casos coletados, e
+(`api/tests/integration/test_business_rules_break.py`, 262 casos coletados, e
 `worker/tests/modules/jobs/test_business_rules_break.py`, 17 casos coletados).
 A suíte cobre:
 

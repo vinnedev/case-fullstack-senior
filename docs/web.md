@@ -80,6 +80,10 @@ sequenceDiagram
   identidade capturada quando a mutação começou. O detalhe expandido acompanha
   `queued`/`running` até o estado terminal e carrega o resultado ao chegar em
   `done`.
+- **Erros e paginação**: falhas nas consultas administrativas são exibidas como
+  erro, sem serem confundidas com listas vazias; falhas de refetch preservam os
+  dados válidos em cache. Trocas de tenant/empresa/filtro e reduções do total
+  reposicionam a paginação antes de renderizar uma página impossível.
 
 ## Tipagem
 

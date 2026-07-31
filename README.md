@@ -29,7 +29,15 @@ docker compose --profile obs up --build -d
 docker compose ps
 ```
 
-A API executa as migrations SQL antes de iniciar e o serviço `seed` (idempotente) carrega os dados de demonstração em todo `up` — duas empresas, quatro usuários e ~30 jobs prontos para explorar, como no case original. A observabilidade é opcional (profile `obs`); o guia completo — o que cada serviço coleta, dashboards, alertas e trade-offs — está em [observability/README.md](observability/README.md).
+A API executa as migrations SQL antes de iniciar e o serviço `seed` (idempotente) carrega os dados de demonstração em todo `up` — duas empresas, quatro usuários e ~30 jobs prontos para explorar, como no case original.
+
+**Observabilidade é opcional de propósito** (profile `obs` do Compose): o `up` padrão sobe exatamente o que o case pede — aplicação funcional com um comando — sem custar ao avaliador o build e a execução de 7 containers extras (Prometheus, Grafana, Loki, Promtail, cAdvisor e dois exporters; o cAdvisor inclusive roda privilegiado para medir os containers). A stack completa sobe com:
+
+```bash
+docker compose --profile obs up --build -d
+```
+
+O guia completo — o que cada serviço coleta, dashboards, alertas e trade-offs — está em [observability/README.md](observability/README.md).
 
 Serviços disponíveis:
 

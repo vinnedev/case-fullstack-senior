@@ -80,6 +80,10 @@ com **máximo de 3 tentativas** (`MAX_ATTEMPTS`), é:
 
 O agendamento do retry manual usa `jobs.next_attempt_at`: o claim ignora jobs
 com retry no futuro (`WHERE next_attempt_at IS NULL OR next_attempt_at <= now()`).
+Dois índices parciais da migration `0012` separam jobs prontos dos agendados:
+o primeiro atende a fila imediata por `id`; o segundo ordena
+`(next_attempt_at, id)` para o próximo wake-up e os retries vencidos. A migration
+usa criação/remoção concorrente para não bloquear escrita na fila.
 O endpoint `POST /jobs/{id}/retry` limpa o erro, reenfileira o job e aplica
 backoff exponencial de 5s na primeira repetição e 10s na segunda. Uma nova
 tentativa concorrente não cria outro job: a transição condicional
