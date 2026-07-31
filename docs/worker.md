@@ -54,12 +54,16 @@ se um notify se perder (LISTEN/NOTIFY não tem entrega garantida sem listener).
      só é debitada se o insert realmente aconteceu (idempotente em retry).
 
 Durante o trabalho, uma conexão separada monitora o status do job. O handler
-recebe um token cooperativo e deve verificá-lo em pontos seguros. Ao detectar
-cancelamento, o worker lança `JobCancelledError`, faz rollback da transação
-ativa, limpa `locked_at`/`worker_id` e encerra somente o job atual. O processo
-continua vivo para processar a fila restante. Handlers que executem operações
-externas devem aplicar compensação própria, pois operações já commitadas fora
-da transação do job não podem ser desfeitas pelo PostgreSQL.
+somente começa depois de o monitor confirmar, dentro de um tempo limitado,
+`LISTEN` + commit + releitura do status. Se o monitor não ficar pronto ou cair
+durante a execução, o worker falha fechado: interrompe o token e registra a
+causa em `last_error`, sem executar ou continuar trabalho sem supervisão. O
+handler recebe o token cooperativo e deve verificá-lo em pontos seguros. Ao
+detectar um cancelamento real da API, lança `JobCancelledError`, faz rollback
+da transação ativa, limpa `locked_at`/`worker_id` e encerra somente o job atual.
+O processo continua vivo para processar a fila restante. Handlers que executem
+operações externas devem aplicar compensação própria, pois operações já
+commitadas fora da transação do job não podem ser desfeitas pelo PostgreSQL.
 
 ## Falhas, retry com backoff e DLQ
 

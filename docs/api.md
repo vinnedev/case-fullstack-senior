@@ -61,9 +61,16 @@ tenant responde **404** (não vaza existência).
 | `POST /jobs` | Cria job `queued` (**201**); aceita `Idempotency-Key` (recomendado); respeita `max_concurrent_jobs` (lock na company) | 401, 409, 422, 429 |
 | `POST /jobs/{id}/cancel` | Cancela `queued`/`running` (UPDATE condicional atômico) | 401, 404, 409 |
 | `POST /jobs/{id}/retry` | Reenfileira `failed` com `attempts < 3` | 401, 404, 409 |
-| `GET /admin/jobs` | Todos os jobs, todas as empresas — exige role `admin` | 401, 403 |
+| `GET /admin/companies` | Empresas com resumo de processamento (contagens por status) — exige role `admin` | 401, 403 |
+| `GET /admin/jobs?company_id&status` | Todos os jobs, contrato do case original (`id`, `company_id`, `status`), com filtros opcionais por empresa e status — exige role `admin` | 401, 403 |
 | `GET /admin/dlq` | Dead letter queue paginada (jobs que esgotaram tentativas) — exige role `admin` | 401, 403 |
 | `GET /metrics` | Métricas Prometheus da API | — |
+
+Além dos códigos por rota, qualquer operação pode responder `503` durante o
+graceful shutdown (documentado no OpenAPI de todas as operações). Toda resposta
+carrega o header `X-Request-ID` — o mesmo valor gravado como `trace_id` do job
+nas mutações; em erros que não tocam job (`401`/`422`/`429`), é o elo entre a
+resposta do cliente e o wide event da API.
 
 ### Idempotência no create
 
@@ -92,7 +99,7 @@ inválida (401, fail-closed) — não como falta de permissão.
 
 | Item | Obrigatório | Onde |
 |---|---|---|
-| `X-Auth` | **sim** — securityScheme aplicado às 8 operações (botão *Authorize* no Swagger) | header, todas as rotas |
+| `X-Auth` | **sim** — securityScheme aplicado a todas as operações (botão *Authorize* no Swagger) | header, todas as rotas |
 | `Idempotency-Key` | não (recomendado; gerada pelo servidor se ausente) | header, apenas `POST /jobs` |
 | `job_id` | **sim** (`≥ 1`) | path, rotas de job |
 | corpo `NewJob` | **sim** | body, `POST /jobs` |
@@ -106,7 +113,7 @@ gerados não tratarem a chave como ausente. `status` nunca é string livre: nas
 leituras e no create é o enum dos 5 estados (o replay de `Idempotency-Key`
 devolve o job original, que pode já ter sido processado); em cancel e retry é
 o único valor possível (`const`).
-O header `X-Total-Count` está documentado nas três rotas paginadas.
+O header `X-Total-Count` está documentado nas quatro rotas paginadas.
 Testes de contrato (`TestR12OpenApiContract`) falham se algo disso regredir.
 
 Os eventos de auditoria retornados no detalhe são `submitted`, `cancelled`,
