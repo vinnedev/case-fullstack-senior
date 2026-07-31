@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  getJobMutationInvalidationKeys,
+  invalidateJobMutationCaches,
+  jobQueryKeys,
+  shouldPollActiveJobs,
+} from "./jobQueries.ts";
+
+import {
+  parseAdminCompanies,
+  parseAdminJobs,
   parseJob,
   parseJobCancelled,
   parseJobCreated,
@@ -70,4 +79,73 @@ test("rejeita resposta de mutação inconsistente", () => {
     status: "queued",
     attempts: 2,
   });
+});
+
+const validAdminJob = {
+  id: 7,
+  company_id: 2,
+  status: "done",
+};
+
+const validCompany = {
+  id: 1,
+  name: "Acme",
+  max_concurrent_jobs: 2,
+  job_quota: 20,
+  total_jobs: 3,
+  queued: 1,
+  running: 0,
+  done: 1,
+  failed: 1,
+  cancelled: 0,
+};
+
+test("valida a listagem administrativa de jobs", () => {
+  assert.deepEqual(parseAdminJobs([validAdminJob]), [validAdminJob]);
+  assert.throws(() => parseAdminJobs([{ ...validAdminJob, status: "exploded" }]));
+  assert.throws(() => parseAdminJobs([{ ...validAdminJob, id: 0 }]));
+});
+
+test("valida a listagem administrativa de empresas", () => {
+  assert.deepEqual(parseAdminCompanies([validCompany]), [validCompany]);
+  assert.throws(() => parseAdminCompanies([{ ...validCompany, name: "" }]));
+  assert.throws(() => parseAdminCompanies([{ ...validCompany, queued: -1 }]));
+  assert.throws(() => parseAdminCompanies([{ ...validCompany, total_jobs: 1.5 }]));
+  assert.throws(() => parseAdminCompanies({}));
+});
+
+test("centraliza as chaves de cache dos jobs", () => {
+  assert.deepEqual(jobQueryKeys.list("token"), ["jobs", "token"]);
+  assert.deepEqual(jobQueryKeys.page("token", 2, 25, "running"), ["jobs", "token", 2, 25, "running"]);
+  assert.deepEqual(jobQueryKeys.detail("token", 17), ["job", "token", 17]);
+  assert.deepEqual(jobQueryKeys.result("token", 17), ["job-result", "token", 17]);
+});
+
+test("invalida lista, detalhe e resultado do job mutado", async () => {
+  const invalidated = [];
+  const variables = { auth: "token", jobId: 17 };
+  await invalidateJobMutationCaches((queryKey) => invalidated.push(queryKey), variables);
+
+  assert.deepEqual(invalidated, getJobMutationInvalidationKeys(variables));
+});
+
+test("mantém o tenant da mutação pendente ao invalidar após uma troca de autenticação", async () => {
+  const pendingMutation = { auth: "tenant-original", jobId: 17 };
+  const authAfterSwitch = "tenant-atual";
+  const invalidated = [];
+
+  await invalidateJobMutationCaches((queryKey) => invalidated.push(queryKey), pendingMutation);
+
+  assert.deepEqual(invalidated, getJobMutationInvalidationKeys(pendingMutation));
+  assert.deepEqual(invalidated[0], jobQueryKeys.list("tenant-original"));
+  assert.notDeepEqual(invalidated[0], jobQueryKeys.list(authAfterSwitch));
+});
+
+test("faz polling do detalhe somente enquanto o job estiver ativo", () => {
+  assert.equal(shouldPollActiveJobs("queued"), true);
+  assert.equal(shouldPollActiveJobs("running"), true);
+  assert.equal(shouldPollActiveJobs("done"), false);
+  assert.equal(shouldPollActiveJobs("failed"), false);
+  assert.equal(shouldPollActiveJobs("cancelled"), false);
+  assert.equal(shouldPollActiveJobs(undefined), false);
 });

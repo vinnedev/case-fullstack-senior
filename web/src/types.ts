@@ -36,6 +36,18 @@ export type JobCreated = { id: number; status: "queued" };
 export type JobCancelled = { id: number; status: "cancelled" };
 export type JobRetried = { id: number; status: "queued"; attempts: number };
 export type AdminJob = { id: number; company_id: number; status: JobStatus };
+export type AdminCompany = {
+  id: number;
+  name: string;
+  max_concurrent_jobs: number;
+  job_quota: number;
+  total_jobs: number;
+  queued: number;
+  running: number;
+  done: number;
+  failed: number;
+  cancelled: number;
+};
 export type JobsPage = { jobs: Job[]; total: number };
 
 const JOB_STATUSES = new Set<JobStatus>(["queued", "running", "done", "failed", "cancelled"]);
@@ -196,6 +208,25 @@ export function parseAdminJobs(value: unknown): AdminJob[] {
       id: requirePositiveInteger(row.id, "id"),
       company_id: requirePositiveInteger(row.company_id, "company_id"),
       status: requireStatus(row.status),
+    };
+  });
+}
+
+export function parseAdminCompanies(value: unknown): AdminCompany[] {
+  if (!Array.isArray(value)) throw new TypeError("Resposta inválida na listagem de empresas");
+  return value.map((item) => {
+    const row = requireRecord(item, "empresa");
+    return {
+      id: requirePositiveInteger(row.id, "id"),
+      name: requireNonEmptyString(row.name, "name"),
+      max_concurrent_jobs: requireNonNegativeInteger(row.max_concurrent_jobs, "max_concurrent_jobs"),
+      job_quota: requireInteger(row.job_quota, "job_quota"),
+      total_jobs: requireNonNegativeInteger(row.total_jobs, "total_jobs"),
+      queued: requireNonNegativeInteger(row.queued, "queued"),
+      running: requireNonNegativeInteger(row.running, "running"),
+      done: requireNonNegativeInteger(row.done, "done"),
+      failed: requireNonNegativeInteger(row.failed, "failed"),
+      cancelled: requireNonNegativeInteger(row.cancelled, "cancelled"),
     };
   });
 }

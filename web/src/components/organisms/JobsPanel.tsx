@@ -2,6 +2,12 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, fetchJobsPage, post } from "../../api";
 import { useDelayedLoading } from "../../hooks/useDelayedLoading";
+import {
+  invalidateJobMutationCaches,
+  jobQueryKeys,
+  shouldPollActiveJobs,
+} from "../../jobQueries";
+import type { JobMutationVariables } from "../../jobQueries";
 import { useToast } from "../../toast";
 import { parseJobCancelled, parseJobRetried } from "../../types";
 import type { JobStatus, JobsPage } from "../../types";
@@ -12,8 +18,6 @@ import { JobDetailPanel } from "../molecules/JobDetailPanel";
 import { JobRow } from "../molecules/JobRow";
 import { Pagination } from "../molecules/Pagination";
 import { SubmitButton } from "./SubmitButton";
-
-const ACTIVE = ["queued", "running"];
 
 export function JobsPanel({ auth }: { auth: string }) {
   const queryClient = useQueryClient();
@@ -28,11 +32,11 @@ export function JobsPanel({ auth }: { auth: string }) {
   if (status) params.set("status", status);
 
   const { data, isLoading } = useQuery<JobsPage>({
-    queryKey: ["jobs", auth, page, pageSize, status],
+    queryKey: jobQueryKeys.page(auth, page, pageSize, status),
     queryFn: ({ signal }) => fetchJobsPage(auth, params, signal),
     // polling apenas com itens pendentes (queued/running); em repouso não há polling —
     // mutações invalidam a query e o refetch-on-focus cobre mudanças externas
-    refetchInterval: (query) => (query.state.data?.jobs.some((j) => ACTIVE.includes(j.status)) ? 1000 : false),
+    refetchInterval: (query) => (query.state.data?.jobs.some((j) => shouldPollActiveJobs(j.status)) ? 1000 : false),
   });
   const showSkeleton = useDelayedLoading(isLoading);
 
@@ -40,22 +44,29 @@ export function JobsPanel({ auth }: { auth: string }) {
     setPage(0);
     setExpanded(null);
   };
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["jobs", auth] });
+  const invalidateList = () => queryClient.invalidateQueries({ queryKey: jobQueryKeys.list(auth) });
+  const invalidateMutation = (variables: JobMutationVariables) =>
+    invalidateJobMutationCaches(
+      (queryKey) => queryClient.invalidateQueries({ queryKey }),
+      variables,
+    );
   const onError = (error: unknown, jobId: number) => {
     const detail = error instanceof ApiError ? error.message : "erro inesperado";
     toast("error", `Job #${jobId}`, detail);
   };
   const cancel = useMutation({
-    mutationFn: (id: number) => post(`/jobs/${id}/cancel`, auth, parseJobCancelled),
-    onSuccess: (_data, id) => toast("info", `Job #${id} cancelado`),
-    onError: (error, id) => onError(error, id),
-    onSettled: invalidate,
+    mutationFn: ({ jobId, auth: mutationAuth }: JobMutationVariables) =>
+      post(`/jobs/${jobId}/cancel`, mutationAuth, parseJobCancelled),
+    onSuccess: (_data, { jobId }) => toast("info", `Job #${jobId} cancelado`),
+    onError: (error, { jobId }) => onError(error, jobId),
+    onSettled: (_data, _error, variables) => invalidateMutation(variables),
   });
   const retry = useMutation({
-    mutationFn: (id: number) => post(`/jobs/${id}/retry`, auth, parseJobRetried),
-    onSuccess: (_data, id) => toast("success", `Job #${id} reenfileirado`),
-    onError: (error, id) => onError(error, id),
-    onSettled: invalidate,
+    mutationFn: ({ jobId, auth: mutationAuth }: JobMutationVariables) =>
+      post(`/jobs/${jobId}/retry`, mutationAuth, parseJobRetried),
+    onSuccess: (_data, { jobId }) => toast("success", `Job #${jobId} reenfileirado`),
+    onError: (error, { jobId }) => onError(error, jobId),
+    onSettled: (_data, _error, variables) => invalidateMutation(variables),
   });
 
   // UX de criação: volta pra página 1, remove filtro que esconderia o job novo
@@ -65,7 +76,7 @@ export function JobsPanel({ auth }: { auth: string }) {
     if (status && status !== "queued") setStatus(null);
     setHighlightId(jobId);
     setTimeout(() => setHighlightId(null), 2500);
-    invalidate();
+    invalidateList();
   };
 
   const total = data?.total ?? 0;
@@ -95,9 +106,9 @@ export function JobsPanel({ auth }: { auth: string }) {
                 job={j}
                 expanded={expanded === j.id}
                 onToggle={() => setExpanded(expanded === j.id ? null : j.id)}
-                onCancel={() => cancel.mutate(j.id)}
-                onRetry={() => retry.mutate(j.id)}
-                busy={(cancel.isPending && cancel.variables === j.id) || (retry.isPending && retry.variables === j.id)}
+                onCancel={() => cancel.mutate({ auth, jobId: j.id })}
+                onRetry={() => retry.mutate({ auth, jobId: j.id })}
+                busy={(cancel.isPending && cancel.variables?.jobId === j.id) || (retry.isPending && retry.variables?.jobId === j.id)}
               />
               {expanded === j.id && <JobDetailPanel auth={auth} jobId={j.id} />}
             </li>

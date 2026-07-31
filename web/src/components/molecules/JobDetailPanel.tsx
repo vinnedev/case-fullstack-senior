@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { get } from "../../api";
 import { useDelayedLoading } from "../../hooks/useDelayedLoading";
+import { jobQueryKeys, shouldPollActiveJobs } from "../../jobQueries";
 import { parseJobDetail, parseJobResult } from "../../types";
 import type { JobDetail, JobResult } from "../../types";
 import { Badge } from "../atoms/Badge";
@@ -29,11 +30,12 @@ function formatActor(actor: string) {
 export function JobDetailPanel({ auth, jobId }: { auth: string; jobId: number }) {
   const [copied, setCopied] = useState(false);
   const detail = useQuery<JobDetail>({
-    queryKey: ["job", auth, jobId],
+    queryKey: jobQueryKeys.detail(auth, jobId),
     queryFn: ({ signal }) => get(`/jobs/${jobId}`, auth, parseJobDetail, signal),
+    refetchInterval: (query) => (shouldPollActiveJobs(query.state.data?.status) ? 1000 : false),
   });
   const result = useQuery<JobResult>({
-    queryKey: ["job-result", auth, jobId],
+    queryKey: jobQueryKeys.result(auth, jobId),
     queryFn: ({ signal }) => get(`/jobs/${jobId}/result`, auth, parseJobResult, signal),
     enabled: detail.data?.status === "done",
     retry: false,
