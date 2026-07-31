@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, fetchJobsPage, post } from "../../api";
-import { useDebounced } from "../../hooks/useDebounced";
 import { useDelayedLoading } from "../../hooks/useDelayedLoading";
 import { useToast } from "../../toast";
 import { parseJobCancelled, parseJobRetried } from "../../types";
@@ -23,16 +22,13 @@ export function JobsPanel({ auth }: { auth: string }) {
   const [pageSize, setPageSize] = useState(10);
   const [expanded, setExpanded] = useState<number | null>(null);
   const [status, setStatus] = useState<JobStatus | null>(null);
-  const [search, setSearch] = useState("");
   const [highlightId, setHighlightId] = useState<number | null>(null);
-  const debouncedSearch = useDebounced(search.trim());
 
   const params = new URLSearchParams({ limit: String(pageSize), offset: String(page * pageSize) });
   if (status) params.set("status", status);
-  if (debouncedSearch) params.set("search", debouncedSearch);
 
   const { data, isLoading } = useQuery<JobsPage>({
-    queryKey: ["jobs", auth, page, pageSize, status, debouncedSearch],
+    queryKey: ["jobs", auth, page, pageSize, status],
     queryFn: ({ signal }) => fetchJobsPage(auth, params, signal),
     // polling apenas com itens pendentes (queued/running); em repouso não há polling —
     // mutações invalidam a query e o refetch-on-focus cobre mudanças externas
@@ -67,7 +63,6 @@ export function JobsPanel({ auth }: { auth: string }) {
   const onCreated = (jobId: number) => {
     resetToFirstPage();
     if (status && status !== "queued") setStatus(null);
-    setSearch("");
     setHighlightId(jobId);
     setTimeout(() => setHighlightId(null), 2500);
     invalidate();
@@ -75,19 +70,14 @@ export function JobsPanel({ auth }: { auth: string }) {
 
   const total = data?.total ?? 0;
   const jobs = data?.jobs ?? [];
-  const filtering = Boolean(status || debouncedSearch);
+  const filtering = Boolean(status);
 
   return (
     <Card title="Jobs" actions={<SubmitButton auth={auth} onCreated={onCreated} />}>
       <FilterBar
         status={status}
-        search={search}
         onStatus={(s) => {
           setStatus(s);
-          resetToFirstPage();
-        }}
-        onSearch={(s) => {
-          setSearch(s);
           resetToFirstPage();
         }}
       />
