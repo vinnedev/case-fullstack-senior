@@ -22,7 +22,7 @@ web/src/
 ├─ hooks/useDelayedLoading.ts  # skeleton visível por >= 200ms (sem flash)
 └─ components/
    ├─ atoms/       Button, Badge, Select (chevron custom), Card, Skeleton, Logo
-   ├─ molecules/   AuthSwitcher, FilterBar (filtro por status + busca por kind),
+   ├─ molecules/   AuthSwitcher, FilterBar (filtro por status),
    │               Pagination (tamanho da página + total), JobRow, JobDetailPanel
    └─ organisms/   Header, JobsPanel, SubmitButton, AdminPanel
 ```
@@ -31,7 +31,7 @@ web/src/
 
 | Rota | Onde na UI |
 |---|---|
-| `GET /jobs` | Listagem paginada (tamanho selecionável, default 10, «Anterior/Próxima») com polling adaptativo, filtro por status e busca (`FilterBar`) |
+| `GET /jobs` | Listagem paginada (tamanho selecionável, default 10, «Anterior/Próxima») com polling adaptativo e filtro por status (`FilterBar`) |
 | `GET /jobs/{id}` | Clique no nome do job → painel expandido (tentativas, último erro e auditoria) |
 | `GET /jobs/{id}/result` | Mesmo painel: payload do resultado (ou "ainda sem resultado") |
 | `POST /jobs` | Botão "Novo job" (Idempotency-Key, disable, toast) |

@@ -1,8 +1,31 @@
 # Observability — métricas, logs e dashboards
 
-Stack completa de observabilidade do Relay, provisionada por código e levantada
-junto com o resto do sistema via `docker compose up --build`. Nada é configurado
-manualmente: datasources e dashboards já nascem prontos.
+Stack completa de observabilidade do Relay, provisionada por código. Nada é
+configurado manualmente: datasources e dashboards já nascem prontos.
+
+## Como subir
+
+A observabilidade é **opcional** e vive atrás do profile `obs` do Compose — o
+`docker compose up --build` padrão sobe só a aplicação (db, api, worker, web,
+seed), mantendo o contrato mínimo do case. Para subir tudo com a stack de
+observabilidade:
+
+```bash
+# aplicação + observabilidade (7 serviços extras)
+docker compose --profile obs up --build -d
+
+# adicionar a observabilidade a uma stack que já está no ar
+docker compose --profile obs up -d
+
+# encerrar incluindo os serviços do profile (e -v para limpar o volume do Loki)
+docker compose --profile obs down
+```
+
+Serviços do profile: Prometheus, Grafana, Loki, Promtail, postgres-exporter,
+blackbox-exporter e cAdvisor (este roda `privileged` com o socket do Docker
+montado — é o custo de coletar CPU/RAM/rede por container; em macOS ele mede a
+VM do Docker Desktop). A API e o worker expõem `/metrics` sempre, com ou sem o
+profile — o profile só liga quem coleta e visualiza.
 
 ## Arquitetura
 

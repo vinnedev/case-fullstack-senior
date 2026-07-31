@@ -20,15 +20,16 @@ Os documentos recebidos com o case foram preservados em [`docs/case/`](docs/case
 **Pré-requisito:** Docker Desktop ou Docker Engine com o plugin `docker compose`.
 
 ```bash
+# aplicação (db, api, worker, web, seed)
 docker compose up --build -d
+
+# aplicação + observabilidade (Prometheus, Grafana, Loki, exporters)
+docker compose --profile obs up --build -d
+
 docker compose ps
 ```
 
-A API executa as migrations SQL antes de iniciar. Para carregar dados de demonstração:
-
-```bash
-docker compose --profile seed run --rm seed
-```
+A API executa as migrations SQL antes de iniciar e o serviço `seed` (idempotente) carrega os dados de demonstração em todo `up` — duas empresas, quatro usuários e ~30 jobs prontos para explorar, como no case original. A observabilidade é opcional (profile `obs`); o guia completo — o que cada serviço coleta, dashboards, alertas e trade-offs — está em [observability/README.md](observability/README.md).
 
 Serviços disponíveis:
 
@@ -38,8 +39,8 @@ Serviços disponíveis:
 | API | http://localhost:8000 | API HTTP |
 | OpenAPI | http://localhost:8000/docs | Contrato interativo da API |
 | PostgreSQL | `localhost:5433` | Banco local (`relay` / `relay`) |
-| Grafana | http://localhost:3000 | Dashboards, login `admin` / `admin` |
-| Prometheus | http://localhost:9090 | Targets, métricas e regras |
+| Grafana | http://localhost:3000 | Dashboards — profile `obs` |
+| Prometheus | http://localhost:9090 | Targets, métricas e regras — profile `obs` |
 
 Comandos operacionais úteis:
 
@@ -47,9 +48,8 @@ Comandos operacionais úteis:
 # Acompanhar inicialização e processamento
 docker compose logs -f api worker
 
-# Confirmar a saúde da API e os targets de métricas
+# Confirmar a saúde da API
 curl http://localhost:8000/health
-# Acesse http://localhost:9090/targets no navegador
 
 # Recriar imagens e containers após alterações
 docker compose up --build -d
@@ -57,8 +57,8 @@ docker compose up --build -d
 # Encerrar a stack mantendo os volumes
 docker compose down
 
-# Encerrar e remover dados locais do PostgreSQL e Loki
-docker compose down -v
+# Encerrar tudo (incluindo o profile obs) e remover volumes locais
+docker compose --profile obs down -v
 
 # Carga de 20k jobs para reproduzir o benchmark de listagem (Sintoma 1)
 docker compose exec -T db psql -U relay -d relay < db/populate_jobs.sql
@@ -84,6 +84,16 @@ Checagens de qualidade Python:
 Cada serviço carrega somente seu próprio arquivo de ambiente local: `api/.env`, `worker/.env` ou `web/.env`. Use o respectivo `.env.example` como ponto de partida. O Compose não depende de `.env` na raiz.
 
 O CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) roda em cada push/PR: lint (`ruff`) e type check (`pyright`) de API e worker, os testes dos três serviços e o build das imagens do Compose.
+
+### Diferenças em relação ao case original
+
+Mudanças de contrato visíveis para quem seguir os comandos do [case original](docs/case/README.md):
+
+| Diferença | Motivo |
+|---|---|
+| PostgreSQL exposto em `localhost:5433` (não 5432) | Evita conflito com Postgres local; dentro do Compose continua 5432 — os comandos `docker compose exec -T db psql ...` do case funcionam sem alteração |
+| `POST /jobs` aceita `Idempotency-Key` opcional | O curl original (`-d '{"kind":"report"}'`) segue funcionando; com o header, replays devolvem o job original e payload divergente responde 409 |
+| `GET /jobs` é paginado (default 50, máx 200) | Resposta continua sendo o array plano original; o total vem no header `X-Total-Count` |
 
 ## Como funciona
 
@@ -151,7 +161,7 @@ flowchart TB
 
 ```mermaid
 stateDiagram-v2
-    [*] --> queued : POST /jobs (201)\nIdempotency-Key obrigatória\nrespeita max_concurrent_jobs
+    [*] --> queued : POST /jobs (201)\nIdempotency-Key opcional (recomendada)\nrespeita max_concurrent_jobs
 
     queued --> running : worker claim\nFOR UPDATE SKIP LOCKED\nattempts + 1, lease + worker_id
     queued --> cancelled : POST /cancel (200)
