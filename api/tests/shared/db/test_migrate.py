@@ -121,10 +121,10 @@ def test_nontransactional_index_migration_recovers_invalid_index_without_ledger(
                 """
             )
         conn.autocommit = False
-        conn.execute("DELETE FROM schema_migrations WHERE version = '0014_job_scheduling_indexes'")
+        conn.execute("DELETE FROM schema_migrations WHERE version = '0012_job_scheduling_indexes'")
         conn.commit()
 
-    assert run_migrations(database_url=migrate_db) == ["0014_job_scheduling_indexes"]
+    assert run_migrations(database_url=migrate_db) == ["0012_job_scheduling_indexes"]
     with psycopg.connect(migrate_db) as conn:
         index = conn.execute(
             """
@@ -136,7 +136,7 @@ def test_nontransactional_index_migration_recovers_invalid_index_without_ledger(
         ).fetchone()
         assert index is not None and index[0] is True
         assert "ON public.jobs USING btree (id)" in index[1]
-        assert "0014_job_scheduling_indexes" in applied_versions(migrate_db)
+        assert "0012_job_scheduling_indexes" in applied_versions(migrate_db)
         conn.execute("SET enable_seqscan = off")
         plan = "\n".join(
             row[0]
@@ -169,7 +169,7 @@ def test_concurrent_runners_apply_each_migration_exactly_once(migrate_db):
         results = list(pool.map(lambda _: run_migrations(database_url=migrate_db), range(2)))
     applied = [version for result in results for version in result]
     assert sorted(applied) == applied_versions(migrate_db)  # sem duplicata entre os dois runners
-    assert "0014_job_scheduling_indexes" in applied
+    assert "0012_job_scheduling_indexes" in applied
     with psycopg.connect(migrate_db) as conn:
         row = conn.execute("SELECT count(*), count(DISTINCT version) FROM schema_migrations").fetchone()
         assert row is not None and row[0] == row[1]
