@@ -28,7 +28,6 @@ IdempotencyKey = Annotated[
     StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
     AfterValidator(_reject_control_characters),
 ]
-JobSearch = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 JobPayload = Annotated[
     str,
     StringConstraints(min_length=1),
@@ -135,7 +134,10 @@ class JobRetried(ApiModel):
 
 
 class AdminJob(ApiModel):
-    """Job na visão administrativa (todas as empresas)."""
+    """Job na visão administrativa (todas as empresas).
+
+    Contrato idêntico ao documentado no case original: id, company_id, status.
+    """
 
     id: PositiveId = Field(description="Identificador do job")
     company_id: PositiveId = Field(description="Empresa dona do job")

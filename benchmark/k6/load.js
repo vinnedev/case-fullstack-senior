@@ -122,7 +122,7 @@ export const options = {
 
 export function read() {
   const offset = Math.floor(Math.random() * 20) * 50;
-  const filtered = Math.random() < 0.2 ? '&status=done&search=rep' : '';
+  const filtered = Math.random() < 0.2 ? '&status=done' : '';
   const res = http.get(`${BASE}/jobs?limit=50&offset=${offset}${filtered}`, {
     headers: USER,
     tags: { route: 'list' },

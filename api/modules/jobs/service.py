@@ -3,6 +3,7 @@ from typing import Any
 from modules.jobs.errors import (
     CompanyUnknownError,
     ConcurrencyLimitError,
+    IdempotencyKeyConflictError,
     InvalidJobStateError,
     JobNotFoundError,
     ResultNotFoundError,
@@ -13,12 +14,6 @@ from shared.db.pool import DictConnection
 MAX_ATTEMPTS = 3
 JOBS_CHANNEL = "jobs_queued"
 CANCELLATIONS_CHANNEL = "jobs_cancelled"
-
-
-def _escape_like(pattern: str | None) -> str | None:
-    if pattern is None:
-        return None
-    return pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _require_row(row: dict[str, Any] | None) -> dict[str, Any]:
@@ -37,9 +32,7 @@ class JobsService:
         limit: int = 50,
         offset: int = 0,
         status: str | None = None,
-        search: str | None = None,
     ) -> list[dict[str, Any]]:
-        search = _escape_like(search)
         return self._conn.execute(
             """
             SELECT j.id, j.kind, j.status, j.created_at,
@@ -47,24 +40,21 @@ class JobsService:
             FROM jobs j
             WHERE j.company_id = %(company_id)s
               AND (%(status)s::text IS NULL OR j.status = %(status)s)
-              AND (%(search)s::text IS NULL OR j.kind ILIKE '%%' || %(search)s || '%%')
             ORDER BY j.created_at DESC, j.id DESC
             LIMIT %(limit)s OFFSET %(offset)s
             """,
-            {"company_id": company_id, "status": status, "search": search, "limit": limit, "offset": offset},
+            {"company_id": company_id, "status": status, "limit": limit, "offset": offset},
         ).fetchall()
 
-    def count_jobs(self, company_id: int, status: str | None = None, search: str | None = None) -> int:
-        search = _escape_like(search)
+    def count_jobs(self, company_id: int, status: str | None = None) -> int:
         return _require_row(
             self._conn.execute(
                 """
                 SELECT count(*) AS n FROM jobs
                 WHERE company_id = %(company_id)s
                   AND (%(status)s::text IS NULL OR status = %(status)s)
-                  AND (%(search)s::text IS NULL OR kind ILIKE '%%' || %(search)s || '%%')
                 """,
-                {"company_id": company_id, "status": status, "search": search},
+                {"company_id": company_id, "status": status},
             ).fetchone()
         )["n"]
 
@@ -142,7 +132,7 @@ class JobsService:
     ) -> tuple[dict[str, Any], bool]:
         existing = self._find_by_idempotency_key(company_id, idempotency_key)
         if existing is not None:
-            return existing, False
+            return self._replay(existing, kind), False
         company = self._conn.execute(
             "SELECT max_concurrent_jobs FROM companies WHERE id = %s FOR UPDATE",
             (company_id,),
@@ -155,7 +145,7 @@ class JobsService:
         # vaga do limite de concorrência.
         existing = self._find_by_idempotency_key(company_id, idempotency_key)
         if existing is not None:
-            return existing, False
+            return self._replay(existing, kind), False
         running = _require_row(
             self._conn.execute(
                 "SELECT count(*) AS n FROM jobs WHERE company_id = %s AND status IN ('queued', 'running')",
@@ -176,15 +166,23 @@ class JobsService:
         if job is None:
             # corrida entre duas requests com a mesma chave: a outra venceu, devolve o job dela
             winner = _require_row(self._find_by_idempotency_key(company_id, idempotency_key))
-            return winner, False
+            return self._replay(winner, kind), False
         if submitted_by is not None:
             self._record_audit_event(job["id"], company_id, "submitted", submitted_by, trace_id)
         self._notify_queued(job["id"])
         return job, True
 
+    @staticmethod
+    def _replay(existing: dict[str, Any], kind: str) -> dict[str, Any]:
+        # Semântica padrão de idempotência: mesma chave com payload diferente é
+        # erro do cliente, não replay — devolver o job original mascararia o bug.
+        if existing["kind"] != kind:
+            raise IdempotencyKeyConflictError(existing["kind"])
+        return {"id": existing["id"], "status": existing["status"]}
+
     def _find_by_idempotency_key(self, company_id: int, idempotency_key: str) -> dict[str, Any] | None:
         return self._conn.execute(
-            "SELECT id, status FROM jobs WHERE company_id = %s AND idempotency_key = %s",
+            "SELECT id, status, kind FROM jobs WHERE company_id = %s AND idempotency_key = %s",
             (company_id, idempotency_key),
         ).fetchone()
 
@@ -221,11 +219,13 @@ class JobsService:
                 ),
                 locked_at = NULL,
                 worker_id = NULL,
+                -- jobs legados (seed) nascem sem trace; o retry os torna rastreáveis
+                trace_id = COALESCE(trace_id, %s),
                 updated_at = now()
             WHERE id = %s AND company_id = %s AND status = 'failed' AND attempts < %s
             RETURNING id, status, attempts
             """,
-            (job_id, company_id, MAX_ATTEMPTS),
+            (trace_id, job_id, company_id, MAX_ATTEMPTS),
         ).fetchone()
         if row is not None:
             self._record_audit_event(job_id, company_id, "retry_requested", requested_by, trace_id)
