@@ -1,5 +1,7 @@
 import argparse
 import os
+import re
+import time
 from pathlib import Path
 from typing import LiteralString, cast
 
@@ -8,6 +10,10 @@ import psycopg
 from shared.config.settings import get_settings
 
 DOWN_SUFFIX = ".down.sql"
+MIGRATION_LOCK_POLL_INTERVAL_S = 0.1
+NON_TRANSACTIONAL_MARKER = "-- migration: non-transactional"
+NEXT_STATEMENT_MARKER = "-- migration: next-statement"
+NEXT_STATEMENT_PATTERN = re.compile(rf"(?m)^[\t ]*{re.escape(NEXT_STATEMENT_MARKER)}[\t ]*(?:\r?\n|$)")
 
 
 def migrations_dir() -> Path:
@@ -31,13 +37,32 @@ def pending_migrations(conn: psycopg.Connection, directory: Path) -> list[Path]:
     return [f for f in sorted(directory.glob("*.sql")) if not f.name.endswith(DOWN_SUFFIX) and f.stem not in applied]
 
 
+def _acquire_migration_lock(conn: psycopg.Connection) -> None:
+    while True:
+        locked = conn.execute("SELECT pg_try_advisory_lock(hashtext('relay_migrations'))").fetchone()
+        conn.commit()
+        if locked is not None and locked[0]:
+            return
+        time.sleep(MIGRATION_LOCK_POLL_INTERVAL_S)
+
+
+def _release_migration_lock(conn: psycopg.Connection) -> None:
+    conn.execute("SELECT pg_advisory_unlock(hashtext('relay_migrations'))")
+    conn.commit()
+
+
+def _non_transactional_statements(sql: str) -> list[str]:
+    return [statement for statement in NEXT_STATEMENT_PATTERN.split(sql) if statement.strip()]
+
+
 def _execute_sql_file(conn: psycopg.Connection, path: Path) -> None:
     sql = path.read_text()
-    if "-- migration: non-transactional" in sql:
+    if NON_TRANSACTIONAL_MARKER in sql:
         conn.commit()
         conn.autocommit = True
         try:
-            conn.execute(cast(LiteralString, sql))
+            for statement in _non_transactional_statements(sql):
+                conn.execute(cast(LiteralString, statement))
         finally:
             conn.autocommit = False
     else:
@@ -48,8 +73,7 @@ def run_migrations(database_url: str | None = None, directory: Path | None = Non
     directory = directory or migrations_dir()
     applied: list[str] = []
     with psycopg.connect(database_url or get_settings().database_url) as conn:
-        conn.execute("SELECT pg_advisory_lock(hashtext('relay_migrations'))")
-        conn.commit()
+        _acquire_migration_lock(conn)
         try:
             for migration in pending_migrations(conn, directory):
                 _execute_sql_file(conn, migration)
@@ -60,8 +84,7 @@ def run_migrations(database_url: str | None = None, directory: Path | None = Non
             conn.rollback()
             raise
         finally:
-            conn.execute("SELECT pg_advisory_unlock(hashtext('relay_migrations'))")
-            conn.commit()
+            _release_migration_lock(conn)
     return applied
 
 
@@ -69,8 +92,7 @@ def rollback_migrations(database_url: str | None = None, directory: Path | None 
     directory = directory or migrations_dir()
     reverted: list[str] = []
     with psycopg.connect(database_url or get_settings().database_url) as conn:
-        conn.execute("SELECT pg_advisory_lock(hashtext('relay_migrations'))")
-        conn.commit()
+        _acquire_migration_lock(conn)
         try:
             for version in reversed(_applied_versions(conn)[-steps:] if steps > 0 else []):
                 down_file = directory / f"{version}{DOWN_SUFFIX}"
@@ -84,8 +106,7 @@ def rollback_migrations(database_url: str | None = None, directory: Path | None 
             conn.rollback()
             raise
         finally:
-            conn.execute("SELECT pg_advisory_unlock(hashtext('relay_migrations'))")
-            conn.commit()
+            _release_migration_lock(conn)
     return reverted
 
 

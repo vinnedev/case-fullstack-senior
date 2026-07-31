@@ -88,6 +88,71 @@ def test_down_files_are_never_applied_as_up(migrate_db):
     assert all(not version.endswith(".down") for version in applied)
 
 
+def test_nontransactional_delimiter_preserves_semicolons(migrate_db, tmp_path):
+    migration = tmp_path / "0001_delimiter.sql"
+    migration.write_text(
+        """
+        -- migration: non-transactional
+        CREATE TABLE delimiter_values (value TEXT NOT NULL DEFAULT 'a;b');
+        -- migration: next-statement
+        INSERT INTO delimiter_values (value) VALUES ('c;d');
+        """
+    )
+
+    assert run_migrations(database_url=migrate_db, directory=tmp_path) == ["0001_delimiter"]
+    with psycopg.connect(migrate_db) as conn:
+        assert conn.execute("SELECT value FROM delimiter_values").fetchone() == ("c;d",)
+
+
+def test_nontransactional_index_migration_recovers_invalid_index_without_ledger(migrate_db):
+    run_migrations(database_url=migrate_db)
+    with psycopg.connect(migrate_db) as conn:
+        conn.execute("INSERT INTO companies (id, name) VALUES (1, 'Acme')")
+        conn.execute("INSERT INTO jobs (company_id, kind, status) VALUES (1, 'report', 'queued'), (1, 'report', 'queued')")
+        conn.commit()
+        conn.autocommit = True
+        conn.execute("DROP INDEX CONCURRENTLY ix_jobs_queued_ready")
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX CONCURRENTLY ix_jobs_queued_ready
+                ON jobs (company_id)
+                WHERE status = 'queued' AND next_attempt_at IS NULL
+                """
+            )
+        conn.autocommit = False
+        conn.execute("DELETE FROM schema_migrations WHERE version = '0014_job_scheduling_indexes'")
+        conn.commit()
+
+    assert run_migrations(database_url=migrate_db) == ["0014_job_scheduling_indexes"]
+    with psycopg.connect(migrate_db) as conn:
+        index = conn.execute(
+            """
+            SELECT i.indisvalid, pg_get_indexdef(i.indexrelid)
+            FROM pg_index AS i
+            JOIN pg_class AS c ON c.oid = i.indexrelid
+            WHERE c.relname = 'ix_jobs_queued_ready'
+            """
+        ).fetchone()
+        assert index is not None and index[0] is True
+        assert "ON public.jobs USING btree (id)" in index[1]
+        assert "0014_job_scheduling_indexes" in applied_versions(migrate_db)
+        conn.execute("SET enable_seqscan = off")
+        plan = "\n".join(
+            row[0]
+            for row in conn.execute(
+                """
+                EXPLAIN (COSTS OFF)
+                SELECT id FROM jobs
+                WHERE status = 'queued' AND next_attempt_at IS NULL
+                ORDER BY id
+                LIMIT 1
+                """
+            )
+        )
+        assert "ix_jobs_queued_ready" in plan
+
+
 def test_second_run_is_a_noop(migrate_db):
     first = run_migrations(database_url=migrate_db)
     assert len(first) >= 11
@@ -104,6 +169,7 @@ def test_concurrent_runners_apply_each_migration_exactly_once(migrate_db):
         results = list(pool.map(lambda _: run_migrations(database_url=migrate_db), range(2)))
     applied = [version for result in results for version in result]
     assert sorted(applied) == applied_versions(migrate_db)  # sem duplicata entre os dois runners
+    assert "0014_job_scheduling_indexes" in applied
     with psycopg.connect(migrate_db) as conn:
         row = conn.execute("SELECT count(*), count(DISTINCT version) FROM schema_migrations").fetchone()
         assert row is not None and row[0] == row[1]
