@@ -1,4 +1,5 @@
 from typing import Annotated, Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Response
 
@@ -6,6 +7,7 @@ from modules.auth.context import AuthContext, current_ctx
 from modules.jobs.errors import (
     CompanyUnknownError,
     ConcurrencyLimitError,
+    IdempotencyKeyConflictError,
     InvalidJobStateError,
     JobNotFoundError,
     ResultNotFoundError,
@@ -18,7 +20,6 @@ from modules.jobs.schemas import (
     JobDetail,
     JobResultOut,
     JobRetried,
-    JobSearch,
     JobSummary,
     NewJob,
 )
@@ -37,7 +38,10 @@ TOTAL_COUNT_HEADER = {
 router = APIRouter(
     prefix="/jobs",
     tags=["jobs"],
-    responses={401: {"description": "Header X-Auth ausente ou inválido"}},
+    responses={
+        401: {"description": "Header X-Auth ausente ou inválido"},
+        503: {"description": "Servidor encerrando (graceful shutdown) — repita a requisição em outra réplica"},
+    },
 )
 
 JobId = Path(description="Identificador do job", ge=1, examples=[42])
@@ -57,13 +61,12 @@ def list_jobs(
     limit: int = Query(default=50, ge=1, le=200, description="Máximo de jobs por página"),
     offset: int = Query(default=0, ge=0, description="Deslocamento para paginação"),
     status: Literal["queued", "running", "done", "failed", "cancelled"] | None = Query(default=None, description="Filtra por status"),
-    search: JobSearch | None = Query(default=None, description="Busca por tipo (kind), case-insensitive"),
     ctx: AuthContext = Depends(current_ctx),
     service: JobsService = Depends(jobs_service),
 ) -> list[JobSummary]:
-    current_event().add(company_id=ctx.company_id, role=ctx.role, limit=limit, offset=offset, status_filter=status, search=search)
-    rows = service.list_jobs(ctx.company_id, limit=limit, offset=offset, status=status, search=search)
-    response.headers["X-Total-Count"] = str(service.count_jobs(ctx.company_id, status=status, search=search))
+    current_event().add(company_id=ctx.company_id, role=ctx.role, limit=limit, offset=offset, status_filter=status)
+    rows = service.list_jobs(ctx.company_id, limit=limit, offset=offset, status=status)
+    response.headers["X-Total-Count"] = str(service.count_jobs(ctx.company_id, status=status))
     current_event().add(jobs_returned=len(rows))
     return [JobSummary.model_validate(row) for row in rows]
 
@@ -103,25 +106,35 @@ def get_result(
     "",
     summary="Cria um novo job",
     status_code=201,
-    responses={429: {"description": "Limite de jobs concorrentes da empresa atingido"}},
+    responses={
+        401: {"description": "Header X-Auth ausente/inválido ou empresa desconhecida"},
+        409: {"description": "Idempotency-Key já utilizada com payload diferente"},
+        429: {"description": "Limite de jobs concorrentes da empresa atingido"},
+    },
 )
 def create_job(
     body: NewJob,
     idempotency_key: Annotated[
-        IdempotencyKey,
+        IdempotencyKey | None,
         Header(
             alias="Idempotency-Key",
             description=(
-                "**Obrigatório** (422 se ausente ou em branco). Chave de idempotência por "
-                "empresa: repetir a mesma chave devolve o job original em vez de criar outro "
-                "(protege contra duplo-clique e retry de rede)."
+                "**Opcional, recomendado.** Chave de idempotência por empresa: repetir a mesma "
+                "chave com o mesmo payload devolve o job original em vez de criar outro (protege "
+                "contra duplo-clique e retry de rede); a mesma chave com payload diferente "
+                "responde 409. Sem o header a API gera uma chave própria e a requisição não tem "
+                "proteção contra reenvio."
             ),
             examples=["3f2c1e9a-duplo-clique"],
         ),
-    ],
+    ] = None,
     ctx: AuthContext = Depends(current_ctx),
     service: JobsService = Depends(jobs_service),
+    conn: DictConnection = Depends(get_db),
 ) -> JobCreated:
+    if idempotency_key is None:
+        idempotency_key = f"srv-{uuid4().hex}"
+        current_event().add(idempotency_key_generated=True)
     event = current_event().add(company_id=ctx.company_id, job_kind=body.kind, idempotency_key=idempotency_key)
     try:
         job, created = service.create_job(
@@ -133,13 +146,18 @@ def create_job(
         )
     except CompanyUnknownError:
         raise HTTPException(401, "empresa desconhecida") from None
+    except IdempotencyKeyConflictError as exc:
+        event.add(existing_kind=exc.existing_kind)
+        raise HTTPException(409, "Idempotency-Key já utilizada com payload diferente") from exc
     except ConcurrencyLimitError as exc:
         event.add(concurrency_limit=exc.limit, jobs_running=exc.running)
         raise HTTPException(429, "limite de jobs concorrentes atingido") from exc
     event.add(job_id=job["id"], idempotency_replay=not created)
+    response = JobCreated.model_validate(job)
+    conn.commit()
     if created:
         jobs_created_total.inc()
-    return JobCreated.model_validate(job)
+    return response
 
 
 @router.post(
@@ -151,7 +169,11 @@ def create_job(
     },
 )
 def cancel_job(
-    job_id: int = JobId, *, ctx: AuthContext = Depends(current_ctx), service: JobsService = Depends(jobs_service)
+    job_id: int = JobId,
+    *,
+    ctx: AuthContext = Depends(current_ctx),
+    service: JobsService = Depends(jobs_service),
+    conn: DictConnection = Depends(get_db),
 ) -> JobCancelled:
     event = current_event().add(company_id=ctx.company_id, job_id=job_id, action="cancel")
     try:
@@ -167,7 +189,9 @@ def cancel_job(
         event.add(job_status=exc.status)
         raise HTTPException(409, f"job em estado '{exc.status}' não pode ser cancelado") from exc
     event.add(job_status=job["status"])
-    return JobCancelled.model_validate(job)
+    response = JobCancelled.model_validate(job)
+    conn.commit()
+    return response
 
 
 @router.post(
@@ -178,7 +202,13 @@ def cancel_job(
         409: {"description": "Job não está em failed ou atingiu o máximo de tentativas"},
     },
 )
-def retry_job(job_id: int = JobId, *, ctx: AuthContext = Depends(current_ctx), service: JobsService = Depends(jobs_service)) -> JobRetried:
+def retry_job(
+    job_id: int = JobId,
+    *,
+    ctx: AuthContext = Depends(current_ctx),
+    service: JobsService = Depends(jobs_service),
+    conn: DictConnection = Depends(get_db),
+) -> JobRetried:
     event = current_event().add(company_id=ctx.company_id, job_id=job_id, action="retry")
     try:
         job = service.retry_job(
@@ -196,4 +226,6 @@ def retry_job(job_id: int = JobId, *, ctx: AuthContext = Depends(current_ctx), s
         event.add(job_status=exc.status)
         raise HTTPException(409, f"job em estado '{exc.status}' não pode ser reprocessado") from exc
     event.add(job_status=job["status"], attempts=job["attempts"])
-    return JobRetried.model_validate(job)
+    response = JobRetried.model_validate(job)
+    conn.commit()
+    return response

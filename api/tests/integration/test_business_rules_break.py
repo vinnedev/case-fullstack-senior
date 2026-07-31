@@ -2,7 +2,8 @@
 
 Regras sob ataque (fontes: TASKS.md, README.md, DECISIONS.md):
   R1  X-Auth é obrigatório e validado em TODAS as rotas (401, nunca 500)
-  R2  Idempotency-Key é obrigatório no POST /jobs (422 com campo apontado)
+  R2  Idempotency-Key opcional mas validada: em branco/gigante → 422; replay
+      com payload diferente → 409; ausente → o servidor gera a própria chave
   R3  Isolamento por tenant em toda leitura/mutação (404, sem vazar existência)
   R4  Role admin exigida nas rotas /admin (403) — e role NÃO dá poder cross-tenant
   R5  Transições de estado válidas apenas (cancel/retry → 409 fora delas)
@@ -28,6 +29,7 @@ ALL_ROUTES = [
     ("post", "/jobs/1/retry"),
     ("get", "/admin/jobs"),
     ("get", "/admin/dlq"),
+    ("get", "/admin/companies"),
 ]
 
 
@@ -96,11 +98,13 @@ class TestR1AuthMandatory:
         assert client.get("/jobs/1", headers=headers).status_code == 404
 
 
-class TestR2IdempotencyKeyMandatory:
-    def test_missing_key_is_422_with_field_location(self, client, seeded):
+class TestR2IdempotencyKey:
+    def test_missing_key_creates_job_with_server_generated_key(self, client, seeded, db):
+        client.post("/jobs/2/cancel", headers=USER)
         resp = client.post("/jobs", json={"kind": "x"}, headers=USER)
-        assert resp.status_code == 422
-        assert resp.json()["detail"][0]["loc"] == ["header", "Idempotency-Key"]
+        assert resp.status_code == 201
+        stored = db.execute("SELECT idempotency_key FROM jobs WHERE id = %s", (resp.json()["id"],)).fetchone()
+        assert stored["idempotency_key"].startswith("srv-")
 
     @pytest.mark.parametrize("bad", ["", " ", "   "])
     def test_blank_key_is_rejected(self, client, seeded, bad):
@@ -111,16 +115,25 @@ class TestR2IdempotencyKeyMandatory:
         resp = client.post("/jobs", json={"kind": "x"}, headers={**USER, "Idempotency-Key": "k" * 201})
         assert resp.status_code == 422
 
-    def test_replay_with_different_body_returns_original(self, client, seeded, db):
-        # semântica documentada: a chave manda; o corpo do replay é ignorado
-        client.post("/jobs/2/cancel", headers=USER)  # libera vaga no limite de concorrência
+    def test_replay_with_different_body_is_conflict(self, client, seeded, db):
+        client.post("/jobs/2/cancel", headers=USER)
         client.post("/jobs/7/cancel", headers=USER)
         headers = {**USER, "Idempotency-Key": "replay-diff"}
-        first = client.post("/jobs", json={"kind": "original"}, headers=headers).json()
-        second = client.post("/jobs", json={"kind": "diferente"}, headers=headers).json()
-        assert second["id"] == first["id"]
+        first = client.post("/jobs", json={"kind": "original"}, headers=headers)
+        assert first.status_code == 201
+        second = client.post("/jobs", json={"kind": "diferente"}, headers=headers)
+        assert second.status_code == 409
         kinds = [r["kind"] for r in db.execute("SELECT kind FROM jobs WHERE idempotency_key = 'replay-diff'").fetchall()]
         assert kinds == ["original"]
+
+    def test_replay_with_same_body_returns_original(self, client, seeded):
+        client.post("/jobs/2/cancel", headers=USER)
+        client.post("/jobs/7/cancel", headers=USER)
+        headers = {**USER, "Idempotency-Key": "replay-same"}
+        first = client.post("/jobs", json={"kind": "original"}, headers=headers).json()
+        second = client.post("/jobs", json={"kind": "original"}, headers=headers)
+        assert second.status_code == 201
+        assert second.json()["id"] == first["id"]
 
 
 class TestR3TenantIsolation:
@@ -135,10 +148,6 @@ class TestR3TenantIsolation:
     def test_list_never_leaks_other_tenant(self, client, seeded):
         ids = {j["id"] for j in client.get("/jobs?limit=200", headers=USER).json()}
         assert 3 not in ids
-
-    def test_search_cannot_escape_tenant(self, client, seeded):
-        rows = client.get("/jobs?search=report", headers=OTHER).json()
-        assert {j["id"] for j in rows} == {3}
 
 
 class TestR4AdminRole:
@@ -162,6 +171,17 @@ class TestR4AdminRole:
         # admin enxerga tudo em /admin, mas NÃO cancela/retry job de outra empresa
         assert client.post("/jobs/3/cancel", headers=ADMIN).status_code == 404
         assert client.post("/jobs/3/retry", headers=ADMIN).status_code == 404
+
+    def test_admin_role_does_not_grant_cross_tenant_reads(self, client, seeded):
+        assert client.get("/jobs/3", headers=ADMIN).status_code == 404
+        assert client.get("/jobs/3/result", headers=ADMIN).status_code == 404
+        ids = {j["id"] for j in client.get("/jobs?limit=200", headers=ADMIN).json()}
+        assert 3 not in ids
+
+    def test_admin_overview_never_exposes_payloads(self, client, seeded):
+        for path in ("/admin/jobs", "/admin/companies"):
+            for row in client.get(path, headers=ADMIN).json():
+                assert "payload" not in row and "last_error" not in row and "kind" not in row
 
 
 class TestR5StateTransitions:
@@ -232,16 +252,10 @@ class TestR8InputValidation:
             "offset=abc",
             "status=DONE",
             "status=invalido",
-            "search=",
-            "search=" + "x" * 101,
         ],
     )
     def test_invalid_query_params_are_422(self, client, seeded, query):
         assert client.get(f"/jobs?{query}", headers=USER).status_code == 422, query
-
-    @pytest.mark.parametrize("search", [" ", "   ", "\t\n"])
-    def test_whitespace_search_is_rejected(self, client, seeded, search):
-        assert client.get("/jobs", params={"search": search}, headers=USER).status_code == 422
 
     @pytest.mark.parametrize("job_id", ["0", "-1", "abc", "1.5", "1e3"])
     def test_invalid_job_ids_are_422(self, client, seeded, job_id):
@@ -268,22 +282,12 @@ class TestR9NoInjection:
     )
     def test_kind_injection_stored_literally(self, client, seeded, db, payload):
         headers = {**USER, "Idempotency-Key": f"inj-{hash(payload)}"}
-        client.post("/jobs/2/cancel", headers=USER)  # libera vaga no limite
+        client.post("/jobs/2/cancel", headers=USER)
         resp = client.post("/jobs", json={"kind": payload}, headers=headers)
         if resp.status_code == 201:
             stored = db.execute("SELECT kind FROM jobs WHERE id = %s", (resp.json()["id"],)).fetchone()["kind"]
             assert stored == payload
         assert db.execute("SELECT count(*) AS n FROM companies").fetchone()["n"] == 2
-
-    def test_search_injection_is_safe(self, client, seeded):
-        resp = client.get("/jobs?search=" + "x%27%3B%20DROP%20TABLE%20jobs%3B%20--", headers=USER)
-        assert resp.status_code == 200
-        assert client.get("/jobs", headers=USER).status_code == 200  # tabela continua viva
-
-    def test_search_wildcards_are_treated_literally(self, client, seeded):
-        # '%' e '_' são curingas do ILIKE; busca deve tratá-los como texto literal
-        assert client.get("/jobs?search=%25", headers=USER).json() == []  # '%'
-        assert client.get("/jobs?search=______", headers=USER).json() == []  # '______' (6 chars)
 
     def test_auth_header_with_extra_separators_keeps_least_privilege(self, client, seeded):
         # "1:admin:extra" vira role "admin:extra" — fora da whitelist, logo 401
@@ -355,10 +359,33 @@ class TestR12OpenApiContract:
                 assert op.get("security"), f"{method.upper()} {path} sem exigência de credencial"
                 assert {"X-Auth": []} in op["security"]
 
-    def test_idempotency_key_is_required_only_on_create(self, client):
+    def test_every_operation_documents_shutdown_503(self, client):
+        spec = client.get("/openapi.json").json()
+        for path, methods in spec["paths"].items():
+            for method, op in methods.items():
+                assert "503" in op["responses"], f"{method.upper()} {path} sem 503 (graceful shutdown) documentado"
+
+    def test_declared_error_responses_match_route_behavior(self, client):
+        expected = {
+            ("get", "/jobs"): {"401", "422", "503"},
+            ("get", "/jobs/{job_id}"): {"401", "404", "422", "503"},
+            ("get", "/jobs/{job_id}/result"): {"401", "404", "422", "503"},
+            ("post", "/jobs"): {"401", "409", "422", "429", "503"},
+            ("post", "/jobs/{job_id}/cancel"): {"401", "404", "409", "422", "503"},
+            ("post", "/jobs/{job_id}/retry"): {"401", "404", "409", "422", "503"},
+            ("get", "/admin/jobs"): {"401", "403", "422", "503"},
+            ("get", "/admin/dlq"): {"401", "403", "422", "503"},
+            ("get", "/admin/companies"): {"401", "403", "422", "503"},
+        }
+        spec = client.get("/openapi.json").json()
+        for (method, path), codes in expected.items():
+            declared = {code for code in spec["paths"][path][method]["responses"] if not code.startswith("2")}
+            assert declared == codes, f"{method.upper()} {path}: declarado {sorted(declared)}, esperado {sorted(codes)}"
+
+    def test_idempotency_key_is_declared_only_on_create(self, client):
         spec = client.get("/openapi.json").json()
         create = {p["name"]: p for p in spec["paths"]["/jobs"]["post"]["parameters"]}
-        assert create["Idempotency-Key"]["required"] is True
+        assert create["Idempotency-Key"].get("required") is not True
         for path, methods in spec["paths"].items():
             for method, op in methods.items():
                 if (path, method) == ("/jobs", "post"):
@@ -369,12 +396,14 @@ class TestR12OpenApiContract:
         schemas = client.get("/openapi.json").json()["components"]["schemas"]
         domain = {"queued", "running", "done", "failed", "cancelled"}
         # cada modelo declara o conjunto exato que aquela operação pode devolver:
-        # os de leitura, o domínio inteiro; os de mutação, o único valor possível
+        # leituras e o create (cujo replay de Idempotency-Key devolve o job
+        # original em qualquer estado), o domínio inteiro; cancel/retry, o
+        # único valor possível
         for name, expected in (
             ("JobSummary", domain),
             ("JobDetail", domain),
             ("AdminJob", domain),
-            ("JobCreated", {"queued"}),
+            ("JobCreated", domain),
             ("JobCancelled", {"cancelled"}),
             ("JobRetried", {"queued"}),
         ):
@@ -393,7 +422,7 @@ class TestR12OpenApiContract:
 
     def test_paginated_routes_document_total_count_header(self, client):
         spec = client.get("/openapi.json").json()
-        for path in ("/jobs", "/admin/jobs", "/admin/dlq"):
+        for path in ("/jobs", "/admin/jobs", "/admin/dlq", "/admin/companies"):
             headers = spec["paths"][path]["get"]["responses"]["200"].get("headers", {})
             assert "X-Total-Count" in headers, f"{path} não documenta X-Total-Count"
 

@@ -128,12 +128,7 @@ voo, nenhum resultado duplicado.
 2. **Worker: ~1 job/s por réplica** (o handler do case simula 1s de trabalho).
    Teto do caminho de escrita ponta a ponta; resolvido com réplicas, como a
    tabela acima demonstra.
-3. **Busca `ILIKE '%termo%'`**: era seq scan de 32–41ms no pior caso (termo sem
-   match). Full-text (tsvector) não cobre substring arbitrária; o índice certo
-   é **trigram** — a migration `0012` cria o GIN `gin_trgm_ops` e o pior caso
-   caiu para 0,02ms. Com termo que casa tudo, o planner corretamente ignora o
-   trgm e mantém o early-stop do índice de paginação.
-4. **Pool de conexões da API** (lição do
+3. **Pool de conexões da API** (lição do
    [caso da Shopify](https://shopify.engineering/scaling-inventory-reservations)):
    sob carga, parte da latência é fila por conexão, não query. As métricas
    `api_db_pool_requests_waiting` e `api_db_pool_utilization_ratio` existem
@@ -145,8 +140,6 @@ voo, nenhum resultado duplicado.
 |---|---|---|
 | Listagem paginada (final) | Index Scan Backward `(company_id, created_at)` + subquery no índice único | 0,26ms |
 | `count(*)` da empresa | Seq scan (empresa = 82% da tabela; com mais tenants o btree assume) | 8ms |
-| `count(*)` com busca | Seq scan + ILIKE em todas as linhas | 41ms |
-| Busca sem match (com trgm, `0012`) | Bitmap no GIN trigram | **0,02ms** |
 | Claim do worker | Index Scan `ix_jobs_queued` | 0,03ms |
 | Recuperação de lease | Index `ix_jobs_running_lease` | 0,2ms |
 | Auditoria do detalhe | Index por job | 0,006ms |

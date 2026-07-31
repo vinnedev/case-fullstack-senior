@@ -44,11 +44,23 @@ export async function post<T>(
   return parse(await r.json());
 }
 
-export async function fetchJobsPage(auth: string, params: URLSearchParams, signal?: AbortSignal): Promise<JobsPage> {
-  const r = await fetch(`${API}/jobs?${params.toString()}`, { headers: { "X-Auth": auth }, signal });
+export type Page<T> = { items: T[]; total: number };
+
+export async function fetchPage<T>(
+  path: string,
+  auth: string,
+  parseItems: (value: unknown) => T[],
+  signal?: AbortSignal,
+): Promise<Page<T>> {
+  const r = await fetch(`${API}${path}`, { headers: { "X-Auth": auth }, signal });
   if (!r.ok) throw await parseError(r);
-  const jobs = parseJobs(await r.json());
-  const total = Number(r.headers.get("X-Total-Count") ?? jobs.length);
+  const items = parseItems(await r.json());
+  const total = Number(r.headers.get("X-Total-Count") ?? items.length);
   if (!Number.isSafeInteger(total) || total < 0) throw new TypeError("Header inválido: X-Total-Count");
-  return { jobs, total };
+  return { items, total };
+}
+
+export async function fetchJobsPage(auth: string, params: URLSearchParams, signal?: AbortSignal): Promise<JobsPage> {
+  const { items, total } = await fetchPage(`/jobs?${params.toString()}`, auth, parseJobs, signal);
+  return { jobs: items, total };
 }

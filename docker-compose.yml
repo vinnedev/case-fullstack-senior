@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: relay
       POSTGRES_PASSWORD: relay
       POSTGRES_DB: relay
-    ports: ["5433:5432"]
+    ports: ["5432:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
       interval: 2s
@@ -17,7 +17,7 @@ services:
     environment:
       DATABASE_URL: postgresql://relay:relay@db:5432/relay
       CORS_ORIGINS: http://localhost:5173
-      LOG_SUPPRESS_PROBE_ROUTES: ${LOG_SUPPRESS_PROBE_ROUTES:-false}
+      LOG_SUPPRESS_PROBE_ROUTES: ${LOG_SUPPRESS_PROBE_ROUTES:-true}
       MIGRATIONS_DIR: /app/db_migrations
       PYTHONUNBUFFERED: "1"
     volumes:
@@ -37,6 +37,7 @@ services:
     environment:
       DATABASE_URL: postgresql://relay:relay@db:5432/relay
       METRICS_PORT: "9100"
+      JOB_SIMULATED_WORK_S: ${JOB_SIMULATED_WORK_S:-1.0}
       PYTHONUNBUFFERED: "1"
     restart: on-failure
     depends_on:
@@ -46,14 +47,16 @@ services:
         condition: service_healthy
   seed:
     image: postgres:16
-    profiles: ["seed"]
     environment:
       PGPASSWORD: relay
     volumes:
       - ./db/seed.sql:/seed.sql:ro
     entrypoint: ["psql", "-h", "db", "-U", "relay", "-d", "relay", "-f", "/seed.sql"]
+    restart: "no"
     depends_on:
       db:
+        condition: service_healthy
+      api:
         condition: service_healthy
   web:
     build: ./web
@@ -63,6 +66,7 @@ services:
     depends_on: [api]
 
   prometheus:
+    profiles: ["obs"]
     image: prom/prometheus:v3.1.0
     volumes:
       - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -71,6 +75,7 @@ services:
     depends_on: [api, worker]
 
   cadvisor:
+    profiles: ["obs"]
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     command: ["--docker_only=true"]
     privileged: true
@@ -83,6 +88,7 @@ services:
     depends_on: [prometheus]
 
   grafana:
+    profiles: ["obs"]
     image: grafana/grafana:11.4.0
     environment:
       GF_SECURITY_ADMIN_USER: admin
@@ -94,6 +100,7 @@ services:
     depends_on: [prometheus, loki]
 
   loki:
+    profiles: ["obs"]
     image: grafana/loki:3.3.2
     command: ["-config.file=/etc/loki/loki-config.yml"]
     volumes:
@@ -101,6 +108,7 @@ services:
       - loki-data:/loki
 
   promtail:
+    profiles: ["obs"]
     image: grafana/promtail:3.3.2
     command: ["-config.file=/etc/promtail/promtail-config.yml"]
     volumes:
@@ -109,6 +117,7 @@ services:
     depends_on: [loki]
 
   postgres-exporter:
+    profiles: ["obs"]
     image: prometheuscommunity/postgres-exporter:v0.16.0
     environment:
       DATA_SOURCE_NAME: postgresql://relay:relay@db:5432/relay?sslmode=disable
@@ -120,6 +129,7 @@ services:
         condition: service_healthy
 
   blackbox-exporter:
+    profiles: ["obs"]
     image: prom/blackbox-exporter:v0.25.0
     volumes:
       - ./observability/blackbox/blackbox.yml:/etc/blackbox_exporter/config.yml:ro

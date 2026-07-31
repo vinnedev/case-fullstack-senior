@@ -1,10 +1,5 @@
 {
   "python.defaultInterpreterPath": "${workspaceFolder}/api/.venv/bin/python",
-  "python.analysis.extraPaths": [
-    "api",
-    "worker"
-  ],
-  "python.analysis.typeCheckingMode": "basic",
   "files.exclude": {
     "**/__pycache__": true,
     "**/.pytest_cache": true,

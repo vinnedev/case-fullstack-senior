@@ -11,12 +11,10 @@ const STATUSES: { value: JobStatus | null; label: string }[] = [
 
 type Props = {
   status: JobStatus | null;
-  search: string;
   onStatus: (status: JobStatus | null) => void;
-  onSearch: (search: string) => void;
 };
 
-export function FilterBar({ status, search, onStatus, onSearch }: Props) {
+export function FilterBar({ status, onStatus }: Props) {
   return (
     <div className="filter-bar">
       <div className="filter-chips" role="tablist" aria-label="Filtrar por status">
@@ -31,19 +29,6 @@ export function FilterBar({ status, search, onStatus, onSearch }: Props) {
             {s.label}
           </button>
         ))}
-      </div>
-      <div className="search-wrap">
-        <svg className="search-icon" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-          <circle cx="6" cy="6" r="4.4" fill="none" stroke="currentColor" strokeWidth="1.5" />
-          <path d="m9.5 9.5 3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-        </svg>
-        <input
-          type="search"
-          placeholder="Buscar por tipo…"
-          value={search}
-          onChange={(e) => onSearch(e.target.value)}
-          aria-label="Buscar jobs por tipo"
-        />
       </div>
     </div>
   );

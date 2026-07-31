@@ -1,0 +1,8 @@
+{
+  "typeCheckingMode": "basic",
+  "exclude": ["**/.*", "**/node_modules", "**/.venv", "**/__pycache__", "**/.pytest_cache", "web", "benchmark"],
+  "executionEnvironments": [
+    { "root": "api", "extraPaths": ["api"] },
+    { "root": "worker", "extraPaths": ["worker"] }
+  ]
+}

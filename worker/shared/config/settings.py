@@ -17,6 +17,9 @@ class Settings(BaseModel):
     cors_origins: str = "http://localhost:5173"
     log_slow_threshold_ms: float = Field(default=1000.0, ge=0)
     log_success_sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
+    # duração do trabalho simulado pelo handler do case; 0 mede só a
+    # maquinaria da fila (claim/finalize) nos benchmarks de throughput
+    job_simulated_work_s: float = Field(default=1.0, ge=0)
 
     @field_validator("database_url")
     @classmethod
@@ -26,9 +29,9 @@ class Settings(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def pool_supports_heartbeat(self) -> "Settings":
-        if self.db_pool_size + self.db_max_overflow < 2:
-            raise ValueError("o worker precisa de ao menos duas conexões para processamento e heartbeat")
+    def pool_supports_processing(self) -> "Settings":
+        if self.db_pool_size + self.db_max_overflow < 3:
+            raise ValueError("o worker precisa de ao menos três conexões para processamento, heartbeat e cancelamento")
         return self
 
 

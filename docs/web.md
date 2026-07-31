@@ -22,8 +22,9 @@ web/src/
 ├─ hooks/useDelayedLoading.ts  # skeleton visível por >= 200ms (sem flash)
 └─ components/
    ├─ atoms/       Button, Badge, Select (chevron custom), Card, Skeleton, Logo
-   ├─ molecules/   AuthSwitcher, FilterBar (filtro por status + busca por kind),
+   ├─ molecules/   AuthSwitcher, FilterBar (filtro por status),
    │               Pagination (tamanho da página + total), JobRow, JobDetailPanel
+   │               CompanyCard e CompanyDetailPanel (visão administrativa)
    └─ organisms/   Header, JobsPanel, SubmitButton, AdminPanel
 ```
 
@@ -31,13 +32,14 @@ web/src/
 
 | Rota | Onde na UI |
 |---|---|
-| `GET /jobs` | Listagem paginada (tamanho selecionável, default 10, «Anterior/Próxima») com polling adaptativo, filtro por status e busca (`FilterBar`) |
+| `GET /jobs` | Listagem paginada (tamanho selecionável, default 10, «Anterior/Próxima») com polling adaptativo e filtro por status (`FilterBar`) |
 | `GET /jobs/{id}` | Clique no nome do job → painel expandido (tentativas, último erro e auditoria) |
 | `GET /jobs/{id}/result` | Mesmo painel: payload do resultado (ou "ainda sem resultado") |
 | `POST /jobs` | Botão "Novo job" (Idempotency-Key, disable, toast) |
 | `POST /jobs/{id}/cancel` | Botão "Cancelar" em queued/running |
 | `POST /jobs/{id}/retry` | Botão "Tentar de novo" em failed |
-| `GET /admin/jobs` | Card "Visão administrativa" (só para role admin) |
+| `GET /admin/companies` | Card "Visão administrativa" (só para role admin): empresas paginadas com contadores por status e skeleton loading |
+| `GET /admin/jobs?company_id&status` | Detalhe expansível da empresa — quota, limite e jobs paginados com filtro por status (mesmo padrão do painel de Jobs; resposta segue o contrato original do case) |
 
 Layout responsivo (breakpoint 600px): header empilhado, linhas com wrap e
 toasts ancorados na base em telas pequenas.
@@ -59,12 +61,12 @@ sequenceDiagram
     U->>L: clique "Cancelar"<br/>(botão visível só em queued/running)
     L->>+A: POST /jobs/{id}/cancel<br/>(X-Auth do usuário selecionado)
     A-->>-L: 200 cancelled — ou 409 se o worker finalizou antes
-    L->>Q: invalidateQueries
-    Q->>+A: GET /jobs (refetch)
-    A-->>-Q: lista atualizada + X-Total-Count
-    Q-->>L: re-render com badge "cancelled"
+    L->>Q: invalida lista, detalhe e resultado do job
+    Q->>+A: GET /jobs + GET /jobs/{id} (refetch)
+    A-->>-Q: caches atualizados
+    Q-->>L: re-render com badge e detalhe "cancelled"
     Note over L,Q: toast de sucesso, ou de erro com o detail real da API
-    Note over Q: polling condicional: 1s só com job ativo,<br/>desligado em repouso (focus-refetch cobre o resto)
+    Note over Q: lista e detalhe fazem polling de 1s só com job ativo;<br/>desligam em estado terminal
 ```
 
 - **Autenticação fake**: o dropdown troca o header `X-Auth` (`1:user`,
@@ -74,7 +76,14 @@ sequenceDiagram
   (`crypto.randomUUID`) por *intenção* e só renova após sucesso — duplo-clique
   ou retry de rede replay-a o mesmo job em vez de duplicar.
 - **Ações por estado**: cancelar aparece em `queued`/`running`; retry em
-  `failed`. Ambas invalidam a query de jobs ao concluir.
+  `failed`. Ambas invalidam lista, detalhe e resultado ao concluir, usando a
+  identidade capturada quando a mutação começou. O detalhe expandido acompanha
+  `queued`/`running` até o estado terminal e carrega o resultado ao chegar em
+  `done`.
+- **Erros e paginação**: falhas nas consultas administrativas são exibidas como
+  erro, sem serem confundidas com listas vazias; falhas de refetch preservam os
+  dados válidos em cache. Trocas de tenant/empresa/filtro e reduções do total
+  reposicionam a paginação antes de renderizar uma página impossível.
 
 ## Tipagem
 

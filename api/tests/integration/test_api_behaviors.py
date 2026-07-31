@@ -58,6 +58,7 @@ class TestUnexpectedInputs:
 
     def test_regular_route_is_never_suppressed(self):
         assert should_emit_request_log("/jobs", suppress_probe_routes=True) is True
+        assert should_emit_request_log("/openapi.json", suppress_probe_routes=True) is True
 
     def test_health_endpoint(self, client):
         response = client.get("/health")

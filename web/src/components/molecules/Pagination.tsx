@@ -1,3 +1,4 @@
+import { isPaginationNeeded } from "../../jobQueries";
 import { Button } from "../atoms/Button";
 import { Select } from "../atoms/Select";
 
@@ -9,14 +10,16 @@ type Props = {
   total: number;
   onPage: (page: number) => void;
   onPageSize: (size: number) => void;
+  itemNoun?: [singular: string, plural: string];
 };
 
-export function Pagination({ page, pageSize, total, onPage, onPageSize }: Props) {
+export function Pagination({ page, pageSize, total, onPage, onPageSize, itemNoun = ["job", "jobs"] }: Props) {
+  if (!isPaginationNeeded(page, pageSize, total)) return null;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   return (
     <nav className="pagination" aria-label="Paginação">
       <span className="page-indicator">
-        {total} {total === 1 ? "job" : "jobs"} · página {page + 1} de {totalPages}
+        {total} {total === 1 ? itemNoun[0] : itemNoun[1]} · página {page + 1} de {totalPages}
       </span>
       <div className="pagination-controls">
         <Select

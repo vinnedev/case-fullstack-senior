@@ -55,22 +55,34 @@ tenant responde **404** (não vaza existência).
 
 | Método/Rota | Descrição | Erros |
 |---|---|---|
-| `GET /jobs?limit&offset&status&search` | Lista paginada da empresa (default 50, máx 200), com `result_count`, filtro por `status`, busca por `kind` e total no header `X-Total-Count` | 401, 422 |
+| `GET /jobs?limit&offset&status` | Lista paginada da empresa (default 50, máx 200), com `result_count`, filtro por `status` e total no header `X-Total-Count` | 401, 422 |
 | `GET /jobs/{id}` | Status, attempts, last_error e eventos de auditoria | 401, 404, 422 |
 | `GET /jobs/{id}/result` | Payload do resultado | 401, 404 |
-| `POST /jobs` | Cria job `queued` (**201**); exige `Idempotency-Key`; respeita `max_concurrent_jobs` (lock na company) | 401, 422, 429 |
+| `POST /jobs` | Cria job `queued` (**201**); aceita `Idempotency-Key` (recomendado); respeita `max_concurrent_jobs` (lock na company) | 401, 409, 422, 429 |
 | `POST /jobs/{id}/cancel` | Cancela `queued`/`running` (UPDATE condicional atômico) | 401, 404, 409 |
 | `POST /jobs/{id}/retry` | Reenfileira `failed` com `attempts < 3` | 401, 404, 409 |
-| `GET /admin/jobs` | Todos os jobs, todas as empresas — exige role `admin` | 401, 403 |
+| `GET /admin/companies` | Empresas com resumo de processamento (contagens por status) — exige role `admin` | 401, 403 |
+| `GET /admin/jobs?company_id&status` | Todos os jobs, contrato do case original (`id`, `company_id`, `status`), com filtros opcionais por empresa e status — exige role `admin` | 401, 403 |
 | `GET /admin/dlq` | Dead letter queue paginada (jobs que esgotaram tentativas) — exige role `admin` | 401, 403 |
 | `GET /metrics` | Métricas Prometheus da API | — |
 
+Além dos códigos por rota, qualquer operação pode responder `503` durante o
+graceful shutdown (documentado no OpenAPI de todas as operações). Toda resposta
+carrega o header `X-Request-ID` — o mesmo valor gravado como `trace_id` do job
+nas mutações; em erros que não tocam job (`401`/`422`/`429`), é o elo entre a
+resposta do cliente e o wide event da API.
+
 ### Idempotência no create
 
-`POST /jobs` exige o header **`Idempotency-Key`** (1–200 chars; 422 se ausente).
-Replay (mesma empresa + mesma chave) devolve o job original: sem linha nova,
-sem novo NOTIFY, sem cobrar de novo o limite de concorrência. Garantido por
-índice único parcial `(company_id, idempotency_key)` + `ON CONFLICT DO NOTHING`.
+`POST /jobs` aceita o header **`Idempotency-Key`** (1–200 chars; opcional,
+recomendado — mantém o contrato original do case, em que o header não existia).
+Replay (mesma empresa + mesma chave + mesmo payload) devolve o job original:
+sem linha nova, sem novo NOTIFY, sem cobrar de novo o limite de concorrência.
+Mesma chave com payload diferente responde **409** (semântica padrão de
+idempotência: reuso indevido de chave é erro do cliente, não replay). Sem o
+header, a API gera uma chave própria (`srv-…`) e a requisição não tem proteção
+contra reenvio. Garantido por índice único parcial
+`(company_id, idempotency_key)` + `ON CONFLICT DO NOTHING`.
 
 ### Validação (estilo Zod)
 
@@ -87,12 +99,12 @@ inválida (401, fail-closed) — não como falta de permissão.
 
 | Item | Obrigatório | Onde |
 |---|---|---|
-| `X-Auth` | **sim** — securityScheme aplicado às 8 operações (botão *Authorize* no Swagger) | header, todas as rotas |
-| `Idempotency-Key` | **sim** | header, apenas `POST /jobs` |
+| `X-Auth` | **sim** — securityScheme aplicado a todas as operações (botão *Authorize* no Swagger) | header, todas as rotas |
+| `Idempotency-Key` | não (recomendado; gerada pelo servidor se ausente) | header, apenas `POST /jobs` |
 | `job_id` | **sim** (`≥ 1`) | path, rotas de job |
 | corpo `NewJob` | **sim** | body, `POST /jobs` |
 | `limit`/`offset` | não (default 50/0, faixa 1–200 e ≥ 0) | query, rotas paginadas |
-| `status`/`search` | não (enum do domínio / 1–100 chars) | query, `GET /jobs` |
+| `status` | não (enum do domínio) | query, `GET /jobs` |
 
 Campos `nullable` (`last_error`, `trace_id`, `job_id`, `job_created_at`) são
 **sempre presentes** na resposta — o que varia é o valor ser `null`, e o
@@ -101,7 +113,7 @@ gerados não tratarem a chave como ausente. `status` nunca é string livre: nas
 leituras e no create é o enum dos 5 estados (o replay de `Idempotency-Key`
 devolve o job original, que pode já ter sido processado); em cancel e retry é
 o único valor possível (`const`).
-O header `X-Total-Count` está documentado nas três rotas paginadas.
+O header `X-Total-Count` está documentado nas quatro rotas paginadas.
 Testes de contrato (`TestR12OpenApiContract`) falham se algo disso regredir.
 
 Os eventos de auditoria retornados no detalhe são `submitted`, `cancelled`,

@@ -30,7 +30,12 @@ def test_job_detail_rejects_broken_invariants(payload):
         JobDetail.model_validate(payload)
 
 
-@pytest.mark.parametrize("payload", [{"id": 0, "status": "queued"}, {"id": 1, "status": "done"}])
+@pytest.mark.parametrize("payload", [{"id": 0, "status": "queued"}, {"id": 1, "status": "exploded"}])
 def test_job_created_rejects_broken_invariants(payload):
     with pytest.raises(ValidationError):
         JobCreated.model_validate(payload)
+
+
+def test_job_created_accepts_replayed_job_in_any_domain_status():
+    # replay de Idempotency-Key devolve o job original, que pode já ter rodado
+    assert JobCreated.model_validate({"id": 1, "status": "done"}).status == "done"

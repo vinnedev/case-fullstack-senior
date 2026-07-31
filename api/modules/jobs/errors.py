@@ -21,6 +21,12 @@ class ConcurrencyLimitError(JobsDomainError):
         self.running = running
 
 
+class IdempotencyKeyConflictError(JobsDomainError):
+    def __init__(self, existing_kind: str) -> None:
+        super().__init__("Idempotency-Key já utilizada com payload diferente")
+        self.existing_kind = existing_kind
+
+
 class InvalidJobStateError(JobsDomainError):
     def __init__(self, status: str) -> None:
         super().__init__(f"operação inválida para job em estado '{status}'")

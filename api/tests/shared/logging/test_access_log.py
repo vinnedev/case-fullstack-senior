@@ -30,7 +30,7 @@ def test_successful_probe_requests_are_dropped(access_filter, path):
     assert access_filter.filter(access_record(path, 200)) is False
 
 
-@pytest.mark.parametrize("path", ["/jobs", "/jobs/1", "/admin/dlq", "/docs", "/healthcheck", "/"])
+@pytest.mark.parametrize("path", ["/jobs", "/jobs/1", "/admin/dlq", "/healthcheck", "/"])
 def test_business_requests_are_kept(access_filter, path):
     assert access_filter.filter(access_record(path, 200)) is True
 

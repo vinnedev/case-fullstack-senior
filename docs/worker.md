@@ -54,12 +54,16 @@ se um notify se perder (LISTEN/NOTIFY não tem entrega garantida sem listener).
      só é debitada se o insert realmente aconteceu (idempotente em retry).
 
 Durante o trabalho, uma conexão separada monitora o status do job. O handler
-recebe um token cooperativo e deve verificá-lo em pontos seguros. Ao detectar
-cancelamento, o worker lança `JobCancelledError`, faz rollback da transação
-ativa, limpa `locked_at`/`worker_id` e encerra somente o job atual. O processo
-continua vivo para processar a fila restante. Handlers que executem operações
-externas devem aplicar compensação própria, pois operações já commitadas fora
-da transação do job não podem ser desfeitas pelo PostgreSQL.
+somente começa depois de o monitor confirmar, dentro de um tempo limitado,
+`LISTEN` + commit + releitura do status. Se o monitor não ficar pronto ou cair
+durante a execução, o worker falha fechado: interrompe o token e registra a
+causa em `last_error`, sem executar ou continuar trabalho sem supervisão. O
+handler recebe o token cooperativo e deve verificá-lo em pontos seguros. Ao
+detectar um cancelamento real da API, lança `JobCancelledError`, faz rollback
+da transação ativa, limpa `locked_at`/`worker_id` e encerra somente o job atual.
+O processo continua vivo para processar a fila restante. Handlers que executem
+operações externas devem aplicar compensação própria, pois operações já
+commitadas fora da transação do job não podem ser desfeitas pelo PostgreSQL.
 
 ## Falhas, retry com backoff e DLQ
 
@@ -76,6 +80,10 @@ com **máximo de 3 tentativas** (`MAX_ATTEMPTS`), é:
 
 O agendamento do retry manual usa `jobs.next_attempt_at`: o claim ignora jobs
 com retry no futuro (`WHERE next_attempt_at IS NULL OR next_attempt_at <= now()`).
+Dois índices parciais da migration `0012` separam jobs prontos dos agendados:
+o primeiro atende a fila imediata por `id`; o segundo ordena
+`(next_attempt_at, id)` para o próximo wake-up e os retries vencidos. A migration
+usa criação/remoção concorrente para não bloquear escrita na fila.
 O endpoint `POST /jobs/{id}/retry` limpa o erro, reenfileira o job e aplica
 backoff exponencial de 5s na primeira repetição e 10s na segunda. Uma nova
 tentativa concorrente não cria outro job: a transição condicional
@@ -119,6 +127,6 @@ registrados pela API com o principal autenticado.
 ## Executar e testar
 
 ```bash
-uv run main.py     # local (usa worker/.env; Postgres em localhost:5433)
+uv run main.py     # local (usa worker/.env; Postgres em localhost:5432)
 uv run pytest      # testcontainers: claim, falha, retry, cancel mid-flight, NOTIFY
 ```

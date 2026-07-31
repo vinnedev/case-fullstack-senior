@@ -185,22 +185,33 @@ def test_list_jobs_filters_by_status(client, seeded):
     assert client.get("/jobs?status=invalido", headers=HEADERS).status_code == 422
 
 
-def test_list_jobs_searches_by_kind(client, seeded):
-    resp = client.get("/jobs?search=IMP", headers=HEADERS)
-    assert [j["kind"] for j in resp.json()] == ["import"]
-    assert resp.headers["X-Total-Count"] == "1"
+def test_retry_backfills_missing_trace_id(client, seeded, db):
+    resp = client.post("/jobs/4/retry", headers=HEADERS)
+    assert resp.status_code == 200
+    stored = db.execute("SELECT trace_id FROM jobs WHERE id = 4").fetchone()["trace_id"]
+    assert stored == resp.headers["X-Request-ID"]
 
 
-def test_list_jobs_combines_filters(client, seeded):
-    resp = client.get("/jobs?status=done&search=report", headers=HEADERS)
-    assert [j["id"] for j in resp.json()] == [1]
+def test_retry_preserves_existing_trace_id(client, seeded, db):
+    db.execute("UPDATE jobs SET trace_id = 'trace-original' WHERE id = 4")
+    db.commit()
+    assert client.post("/jobs/4/retry", headers=HEADERS).status_code == 200
+    assert db.execute("SELECT trace_id FROM jobs WHERE id = 4").fetchone()["trace_id"] == "trace-original"
 
 
-def test_create_job_requires_idempotency_key(client, seeded):
-    resp = client.post("/jobs", json={"kind": "report"}, headers=HEADERS)
-    assert resp.status_code == 422
-    detail = resp.json()["detail"][0]
-    assert detail["loc"] == ["header", "Idempotency-Key"]
+def test_create_job_without_idempotency_key_generates_one(client, seeded, db):
+    resp = client.post("/jobs", json={"kind": "report"}, headers={"X-Auth": "2:user"})
+    assert resp.status_code == 201
+    stored = db.execute("SELECT idempotency_key FROM jobs WHERE id = %s", (resp.json()["id"],)).fetchone()
+    assert stored["idempotency_key"].startswith("srv-")
+
+
+def test_create_job_replay_with_different_kind_is_conflict(client, seeded):
+    headers = {"X-Auth": "2:user", "Idempotency-Key": "t-test_routes-mismatch"}
+    assert client.post("/jobs", json={"kind": "report"}, headers=headers).status_code == 201
+    resp = client.post("/jobs", json={"kind": "outro"}, headers=headers)
+    assert resp.status_code == 409
+    assert "payload diferente" in resp.json()["detail"]
 
 
 def test_create_job_requires_auth_header(client, seeded):

@@ -2,14 +2,36 @@ groups:
   - name: relay-slos
     interval: 30s
     rules:
+# Ratios protegidos contra janela sem tráfego: o fallback só responde 100%
+# quando o target ainda está disponível. Indisponibilidade é alertada à parte.
       - record: relay:slo_api_availability:ratio5m
-        expr: 1 - (sum(rate(http_request_duration_seconds_count{status=~"5.."}[5m])) / sum(rate(http_request_duration_seconds_count[5m])))
+        expr: (1 - (sum(rate(http_request_duration_seconds_count{status=~"5.."}[5m])) / (sum(rate(http_request_duration_seconds_count[5m])) > 0))) or on() (max(up{job="api"}) == 1)
 
       - record: relay:slo_api_latency_under_1s:ratio5m
-        expr: sum(rate(http_request_duration_seconds_bucket{le="1"}[5m])) / sum(rate(http_request_duration_seconds_count[5m]))
+        expr: (sum(rate(http_request_duration_seconds_bucket{le="1"}[5m])) / (sum(rate(http_request_duration_seconds_count[5m])) > 0)) or on() (max(up{job="api"}) == 1)
 
       - record: relay:slo_worker_success:ratio5m
-        expr: sum(rate(jobs_processed_total{outcome="done"}[5m])) / sum(rate(jobs_processed_total{outcome=~"done|failed"}[5m]))
+        expr: (sum(rate(jobs_processed_total{outcome="done"}[5m])) / (sum(rate(jobs_processed_total{outcome=~"done|failed"}[5m])) > 0)) or on() (max(up{job="worker"}) == 1)
+
+      - alert: RelayAPIDown
+        expr: up{job="api"} == 0 or probe_success{instance="http://api:8000/health"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: api
+        annotations:
+          summary: API indisponível
+          description: O scrape interno ou a sonda HTTP externa não alcança a API.
+
+      - alert: RelayWorkerDown
+        expr: up{job="worker"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: worker
+        annotations:
+          summary: Worker indisponível
+          description: Uma réplica do worker deixou de expor métricas.
 
       - alert: RelayAPIHighP99
         expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) > 1

@@ -17,13 +17,19 @@ scrape_configs:
         labels:
           service: api
 
+  # DNS discovery: o Docker devolve o IP de cada réplica do serviço, então
+  # `docker compose up --scale worker=N` entra no scrape automaticamente.
   - job_name: worker
-    static_configs:
-      - targets: ["worker:9100"]
-        labels:
-          service: worker
+    dns_sd_configs:
+      - names: ["worker"]
+        type: A
+        port: 9100
+    relabel_configs:
+      - target_label: service
+        replacement: worker
 
   - job_name: postgres
+    scrape_interval: 60s
     static_configs:
       - targets: ["postgres-exporter:9187"]
         labels:
@@ -43,7 +49,7 @@ scrape_configs:
     static_configs:
       - targets:
           - http://web:5173
-          - http://api:8000/docs
+          - http://api:8000/health
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target

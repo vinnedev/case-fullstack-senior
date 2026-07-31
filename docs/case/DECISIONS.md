@@ -48,11 +48,18 @@ o que é, como você o encontrou, qual a causa raiz e qual o impacto.
 Para cada problema acima: a correção, os arquivos alterados, por que ela
 resolve a causa raiz (não só o sintoma), e **como você verificou** que resolveu.
 
+### Primeira entrega: correções e fluxos completos
+
+Nesta etapa, priorizei fechar os fluxos funcionais e suas garantias de
+corretude: tenant, autorização, transições de estado, idempotência,
+cancelamento, retry, DLQ e rastreabilidade. O objetivo era ter uma entrega
+revisável e testável antes de discutir capacidade.
+
 - **Isolamento por tenant** (`api/modules/jobs/service.py`, `routes.py`): todas as queries de leitura/mutação de job ganharam `AND company_id = %s` vindo do contexto autenticado. Job de outra empresa responde 404 (não 403, para não confirmar existência do ID). Verificação: testes `test_*_isolated_by_tenant` cobrindo get, result, cancel e retry cruzando tenants.
 
 - **Role no admin** (`modules/admin/routes.py`): dependency `require_admin` → 403 para não-admin. Testado.
 
-- **Sintoma 1 (listagem lenta)**: o N+1 virou uma única query paginada. A primeira versão calculava o `result_count` com `LEFT JOIN + count + GROUP BY`, e o benchmark de carga (ver [benchmark/README.md](../../benchmark/README.md)) mostrou que o `GROUP BY j.id` agregava os 100k jobs da empresa antes do `LIMIT`: 64ms por request no `EXPLAIN ANALYZE`, média de 227ms sob 50 VUs. A versão final pagina primeiro pelo índice `(company_id, created_at)` e só conta resultados para as linhas da página, com subquery correlata no índice único de `job_results`: 0,26ms no mesmo `EXPLAIN`, 246× mais rápido. A paginação `limit/offset` (máx 200) limita a serialização. Verificação: com 20.000 jobs (carga reproduzível com `db/populate_jobs.sql`) a resposta ficou em ~100ms constantes e, sob carga, o cenário `read` do k6 foi de 76 para 318 req/s com p95 caindo de 1,15s para 218ms. Índices são dirigidos pelas queries reais, **não** indexei colunas de baixa cardinalidade isoladas, que só custariam escrita/RAM.
+- **Sintoma 1 (listagem lenta)**: o N+1 virou uma única query paginada. Na primeira entrega, calculei `result_count` com `LEFT JOIN + count + GROUP BY`; isso eliminou o N+1 e limitou a resposta a no máximo 200 itens. O benchmark posterior mostrou que `GROUP BY j.id` ainda agregava os 100k jobs da empresa antes do `LIMIT`: 64ms por request no `EXPLAIN ANALYZE`, média de 227ms sob 50 VUs. A evolução foi paginar primeiro pelo índice `(company_id, created_at)` e contar resultados apenas para as linhas da página, com subquery correlata no índice único de `job_results`: 0,26ms no mesmo `EXPLAIN`, 246× mais rápido. Com 20.000 jobs, a carga é reproduzível com `db/populate_jobs.sql`; os números detalhados, planos e cenários estão em [benchmark/README.md](../../benchmark/README.md). Índices continuam dirigidos pelas queries reais, sem indexar colunas de baixa cardinalidade isoladas.
 
 - **Sintoma 2 (duplicação/limite furado)**: no `create_job`, `SELECT ... FOR UPDATE` na linha da company serializa criações da mesma empresa (empresas diferentes não competem). No worker, claim com `FOR UPDATE SKIP LOCKED`. Resultado único garantido no banco: `UNIQUE (job_id)` + `INSERT ... ON CONFLICT DO NOTHING`, e a quota só é debitada quando o insert de resultado realmente acontece. Verificação: 20 POSTs simultâneos → exatamente 2 aceitos (limite 2), 18× 429, além do teste `test_result_and_quota_are_idempotent`.
 
@@ -64,31 +71,30 @@ resolve a causa raiz (não só o sintoma), e **como você verificou** que resolv
 
 - **Observabilidade operacional** (`observability/`): cAdvisor coleta CPU/memória/rede por container. O pool da API publica utilização e requests aguardando conexão. `pg_stat_statements` com `track_io_timing` identifica queryid, tempo total/médio e parcela de leitura/escrita. O dashboard Performance Investigation consulta SQL ativas e bloqueios. Regras Prometheus provisionam SLOs e alertas de p99, disponibilidade, backlog, pool, conexões e deadlocks. Labels de query continuam limitados a `queryid`, e o texto completo só é consultado na tabela interna do Grafana para evitar cardinalidade no Prometheus.
 
-- **Feature B (retry idempotente)**: toda execução que falha fica em `failed`. `POST /jobs/{id}/retry` faz `UPDATE ... WHERE status='failed' AND attempts < 3 RETURNING` e agenda `next_attempt_at` com backoff exponencial (5s, depois 10s). Duplo-clique: o segundo UPDATE não casa linha e responde 409. A terceira falha vai para a DLQ. Idempotência de resultado/quota é a mesma do sintoma 2 (UNIQUE + ON CONFLICT + quota amarrada à transição). Verificação: testes de duplo retry, limite de tentativas, backoff e cross-tenant.
+- **Feature B (retry idempotente)**: toda execução que falha fica em `failed`. `POST /jobs/{id}/retry` faz `UPDATE ... WHERE status='failed' AND attempts < 3 RETURNING` e agenda `next_attempt_at` com backoff exponencial (5s, depois 10s). Duplo-clique: o segundo UPDATE não casa linha e responde 409. A terceira falha vai para a DLQ. Idempotência de resultado/quota é a mesma do sintoma 2 (UNIQUE + ON CONFLICT + quota amarrada à transição). A migration `0012` separa jobs imediatos e agendados em índices parciais, usados pelo claim e pelo cálculo do próximo wake-up; os índices são criados/removidos com DDL concorrente e recuperação de build interrompido. Verificação: testes de duplo retry, limite de tentativas, backoff, cross-tenant e `EXPLAIN` real com 10 mil retries futuros.
 
 - **Graceful shutdown** (`shared/http/graceful_shutdown.py` + lifespan): para de aceitar (503), drena requests em andamento com timeout e fecha o pool. Testado com testes async dedicados.
 
-- **Schema versionado**: migrations SQL puras em `db/migrations/*.sql` com runner mínimo (`shared/db/migrate.py`) e tabela `schema_migrations`. O container da api aplica antes do uvicorn.
+- **Schema versionado com up e down**: migrations SQL puras em `db/migrations/*.sql`, cada uma com o reverso `*.down.sql` ao lado, e runner mínimo (`shared/db/migrate.py`) com tabela `schema_migrations`, advisory lock e transação por passo — `python -m shared.db.migrate [up|down --steps N|--all]`. O container da api aplica o up antes do uvicorn. Downs restauram o schema anterior (transformações de dados são one-way, documentadas em cada arquivo); um teste garante que toda migration tem down e que o ciclo up→down total→up é reprodutível.
 
 - **CI no GitHub Actions** (`.github/workflows/ci.yml`): pipeline em cada push/PR. Para api e worker, em matriz: lint (`ruff check` e `ruff format --check`), type check (`pyright`) e os testes com testcontainers. Para o front: `tsc --noEmit`, testes e build. Por fim, `docker compose build` valida que as imagens continuam construindo. A entrega pedia um repositório pronto para review, então o CI prova que tudo passa fora da minha máquina.
 
-- **Frontend**: `api.ts` tipado com `ApiError` extraindo o `detail` do backend (409/429 deixam de ser silêncio, antes mascaravam até incidente de segurança). `JobsPanel` tipado com botões de cancelar/retry coerentes com o estado e feedback de erro visível. `SubmitButton` com disable durante o submit e `Idempotency-Key` por intenção. Polling adaptativo: 1s só com job ativo, desligado em repouso (o polling fixo de 1s combinado com o antigo N+1 era DoS acidental). CORS restrito a allowlist por env (`CORS_ORIGINS`) com métodos e headers mínimos, em vez de `*`. Por fim, UI reestilizada com a identidade da Galaxies (paleta azul, ícone, cards, badges por status) e sistema de toasts para todo feedback de ação, sem lib de UI, só CSS.
+- **Frontend**: `api.ts` tipado com `ApiError` extraindo o `detail` do backend (409/429 deixam de ser silêncio, antes mascaravam até incidente de segurança). `JobsPanel` tipado com botões de cancelar/retry coerentes com o estado e feedback de erro visível. `SubmitButton` com disable durante o submit e `Idempotency-Key` por intenção. Polling adaptativo: 1s só com job ativo, desligado em repouso (o polling fixo de 1s combinado com o antigo N+1 era DoS acidental). Troca de tenant e redução do total corrigem a página corrente antes de renderizar, e falhas das queries administrativas aparecem como erro explícito sem descartar dados válidos do cache durante um refetch. CORS restrito a allowlist por env (`CORS_ORIGINS`) com métodos e headers mínimos, em vez de `*`; `X-Request-ID` fica exposto ao navegador inclusive no 503 de shutdown. Por fim, UI reestilizada com a identidade da Galaxies (paleta azul, ícone, cards, badges por status) e sistema de toasts para todo feedback de ação, sem lib de UI, só CSS.
 
 ### Bateria adversarial: quebrando as próprias regras
 
 Depois de tudo pronto, escrevi uma suíte cujo objetivo é **falhar**: cada teste
 tenta violar uma regra de negócio com input errado, faltando ou malicioso
-(`api/tests/integration/test_business_rules_break.py`, 248 casos coletados, e
+(`api/tests/integration/test_business_rules_break.py`, 262 casos coletados, e
 `worker/tests/modules/jobs/test_business_rules_break.py`, 17 casos coletados).
 A suíte cobre:
 
 - auth obrigatório em todas as rotas × 11 variações malformadas
-- chave de idempotência ausente, em branco e gigante
+- chave de idempotência em branco e gigante (422), ausente (o servidor gera a própria) e replay com payload diferente (409)
 - isolamento cross-tenant em leitura e mutação
 - roles inválidas e todas as transições de estado proibidas
 - limite de tentativas e limite de concorrência
 - tipos e faixas em todo parâmetro
-- injeção de SQL em `kind` e `search`, curingas de `ILIKE`
 - abuso de protocolo (header duplicado, content-type errado, body de 100k, campos extras tentando definir `id`/`status`)
 - no worker: claim de estados inválidos, backoff pendente, cancelamento no meio da falha, DLQ duplicada e quota debitada duas vezes
 
@@ -109,6 +115,67 @@ fora da whitelist (`root`, `ADMIN`, `admin `) são rejeitadas como credencial
 inválida (401, fail-closed) em vez de "sem permissão". E um job cancelado no
 meio de uma falha **não** volta para a fila nem vai para a DLQ.
 
+### Revisão final: bugs no cancelamento cooperativo e contrato do case
+
+Uma revisão adversarial de código (independente da bateria de testes) encontrou
+falhas reais no caminho de cancelamento do worker, invisíveis nos testes de job
+único:
+
+1. **O monitor de cancelamento ignorava o payload do NOTIFY**
+   (`worker/modules/jobs/listener.py` + `processor.py`): o canal
+   `jobs_cancelled` é compartilhado, mas qualquer notificação disparava o token
+   do job em processamento — cancelar o job X de uma empresa abortava o job Y
+   de outra, que ficava `running` órfão até a recuperação de lease queimá-lo
+   como `failed`. Corrigido comparando o payload com o id do job; teste novo
+   com notify de outro job prova que o token não dispara.
+2. **O `LISTEN` vazava para o pool**: o monitor assinava o canal numa conexão
+   do pool e nunca fazia `UNLISTEN` — a assinatura é de sessão e sobrevive à
+   devolução, então uma conexão reciclada podia entregar notificação velha ao
+   monitor de um job futuro. Corrigido com `UNLISTEN *` + dreno das
+   notificações pendentes antes de devolver a conexão, com teste dedicado.
+3. **O trabalho podia começar sem o monitor estar pronto**: a thread do handler
+   e a thread do `LISTEN` começavam em paralelo; uma falha de conexão era apenas
+   logada e o handler seguia sem cancelamento cooperativo. O processamento agora
+   espera `LISTEN` + commit + releitura do status, com tempo limitado, antes de
+   executar. Falha de setup ou do listener aborta o trabalho de forma
+   fail-closed e persiste a causa em `last_error`; os testes cobrem prontidão,
+   cancelamento já existente, timeout e queda do listener em runtime.
+
+No mesmo passe: o heartbeat passou a tolerar falhas transitórias (3 antes de
+desistir) e, ao perder a lease de vez, dispara o token para abortar o trabalho
+local — e um token disparado sem cancelamento real vira `failed` registrado em
+vez de job órfão; o worker ganhou graceful shutdown (SIGTERM finaliza o job em
+andamento e sai antes do próximo claim) e reconexão do LISTEN.
+
+Três decisões de contrato também foram revistas para honrar a entrega do case:
+o seed voltou a rodar automaticamente no `docker compose up --build` (sem ele o
+banco nascia vazio e o `POST /jobs` falhava com 401 — dois comandos onde o case
+prometia um); a `Idempotency-Key` deixou de ser obrigatória (o curl do próprio
+KNOWN_ISSUES respondia 422), com replay de payload divergente virando 409; e a
+stack de observabilidade saiu do `up` padrão para o profile `obs` do Compose —
+o `docker compose up --build` volta a subir só o que o case pede (7 containers
+a menos, incluindo o cAdvisor `privileged`), e quem quiser dashboards sobe com
+`docker compose --profile obs up --build -d` (guia em
+[observability/README.md](../../observability/README.md)).
+
+No fechamento da revisão, o contrato de erros ganhou uma guarda própria: um
+teste falha se qualquer subclasse de `JobsDomainError` não tiver tradução HTTP
+em `routes.py` (erro novo nunca vira 500 silencioso), e o OpenAPI passou a
+declarar o conjunto exato de códigos por operação — incluindo o `503` do
+graceful shutdown, que existia em runtime mas não estava documentado — com
+teste de contrato espelhando rota a rota. A resposta também ganhou o header
+`X-Request-ID` (o mesmo id que vira `trace_id` do job nas mutações): em
+`401`/`422`/`429`, que não tocam job, ele é o único elo entre a resposta do
+cliente e o wide event no Loki.
+
+No frontend, a mesma revisão encontrou que o detalhe expandido tinha cache
+independente da lista e podia continuar exibindo estado antigo após cancelar,
+retry ou conclusão do worker. As chaves de lista, detalhe e resultado foram
+centralizadas por identidade; cancelar/retry invalidam as três usando a
+identidade capturada pela própria mutação, e detalhes `queued`/`running` fazem
+polling até atingir estado terminal. Assim, a transição para `done` também
+habilita a busca do resultado sem fechar e reabrir o painel.
+
 ### Redução de ruídos de observabilidade
 
 A primeira versão de `LOG_SUPPRESS_PROBE_ROUTES` filtrava só o wide event, e o
@@ -121,34 +188,38 @@ exatamente a mesma regra (rota de probe + status < 400). O filtro é conservador
 por desenho: se o formato do record não for o esperado, ele deixa passar,
 porque silenciar por engano é pior do que uma linha a mais.
 
-### Benchmark de carga e caos (k6)
+### Evolução após o benchmark de carga e caos
 
-Para transformar "escala" em número, montei a pasta
-[`benchmark/`](../../benchmark/README.md): cenários k6 na rede do Compose
-contra 100 mil jobs de uma empresa dedicada, sempre com warmup antes da
-medição, cobrindo todas as rotas e o processamento ponta a ponta. O cenário de
-leitura pagou o investimento logo de cara: expôs que a listagem, mesmo sem o
-N+1, agregava a empresa inteira antes de paginar. Depois da correção, saiu de
-76 para 328 req/s com p95 de 225ms e zero erros. A escrita sustenta 30
-creates/s com p95 de 7,6ms. O ciclo completo (create → fila → worker → done →
-result) roda com e2e p50 de 1,5s dentro da capacidade, e o teste de escala
-provou a horizontalidade do worker: a 3 jobs/s, 1 réplica satura (e2e p95
-27,5s, 102 timeouts) e 4 réplicas seguram p95 em 1,53s com zero timeouts, sem
-nenhum job processado duas vezes.
+Com a primeira entrega funcional concluída, montei
+[`benchmark/`](../../benchmark/README.md): cenários k6 na rede do Compose, com
+warmup, 100 mil jobs em uma empresa dedicada, leitura, escrita, ciclo de vida e
+corridas deliberadas.
 
-O cenário de **caos** dispara as corridas que o desenho promete arbitrar —
-replay concorrente da mesma `Idempotency-Key`, duplo retry disputado no mesmo
-job `failed`, cancel no meio do processamento — e encontrou **dois bugs
-reais** antes de fechar em 100%: o commit pós-resposta e o contrato do replay
-(ambos em [§1](#1-achados--problemas-que-identifiquei), corrigidos e cobertos
-por teste). Na rodada final: 1005 requests, 0% falhas, todas as disputas com
-exatamente um vencedor.
+**O que a primeira versão já resolvia.** O N+1 havia desaparecido, a resposta
+era paginada e as transições concorrentes estavam protegidas por transações e
+constraints. Isso foi suficiente para corrigir os sintomas funcionais do case,
+mas ainda não provava o comportamento sob concorrência e volume.
 
-Gargalos conhecidos após a otimização: o `count(*)` exato do `X-Total-Count`
-(97% do tempo de banco do caminho de leitura, alavanca registrada em
-[§7](#7-próximos-passos-com-mais-tempo)) e o teto de ~1 job/s por réplica do
-worker (o handler simula 1s), resolvido com réplicas. Números completos, plano
-de cada query e metodologia no README do benchmark.
+**O que a medição revelou.** A leitura ainda agregava a empresa inteira antes
+de paginar; uma réplica de worker saturava quando a chegada passava da duração
+do handler simulado; e o cenário de caos encontrou dois bugs fora do fluxo
+manual: commit posterior à resposta e contrato incompatível no replay de
+`Idempotency-Key`.
+
+**O que mudou depois.** A listagem passou a paginar antes de contar resultados,
+o commit foi trazido para dentro do ciclo da request, o contrato de criação foi
+aberto para devolver o job original no replay e o worker foi exercitado com
+múltiplas réplicas. Na rodada final de caos, 1005 requests terminaram sem
+falhas e cada disputa teve um único vencedor. Em leitura, a versão final saiu
+de 76 para 328 req/s com p95 de 225ms e zero erros; com quatro workers, o
+ciclo de vida a 3 jobs/s manteve p95 em 1,53s sem duplicidade. A metodologia e
+os resultados completos permanecem no README do benchmark.
+
+O benchmark também deixou dois limites explícitos: `X-Total-Count` exato é
+hoje o principal custo restante no caminho de leitura, e a capacidade do
+worker depende da duração real do handler. Esses itens foram registrados em
+[§7](#7-próximos-passos-com-mais-tempo), em vez de escondidos como números
+universais de capacidade.
 
 ---
 
@@ -164,7 +235,7 @@ ponta a ponta; como resolveu a corrida do cancelamento.)
 
 - **Idempotência por constraint, não por aplicação**: o "gravou uma vez só" mora no `UNIQUE (job_id)` do banco, o único lugar sem race. Código de aplicação checando "já existe?" seria exatamente o check-then-act que causou o sintoma 2.
 
-- **`Idempotency-Key` no `POST /jobs`** (migration `0005`): retry de rede e duplo-clique na *criação* também não podem duplicar. O header é **obrigatório**, regra de negócio: 422 com o campo apontado se ausente, coberto por teste disparando a request sem o header (a ausência de `X-Auth` responde 401, também testada). A garantia mora no índice único parcial `(company_id, idempotency_key)` com `INSERT ... ON CONFLICT DO NOTHING`. Se a chave já existe, a API devolve o job original: mesmo body, sem novo NOTIFY e sem passar de novo pelo limite de concorrência, que já foi pago na primeira. A chave é reconsultada depois do lock da empresa, o que fecha a janela em que um replay concorrente poderia receber 429 se a primeira request ocupasse a última vaga. A chave é escopada por tenant. O front gera a chave por intenção e só renova após sucesso, então duplo-clique replay-a em vez de duplicar.
+- **`Idempotency-Key` no `POST /jobs`** (migration `0005`): retry de rede e duplo-clique na *criação* também não podem duplicar. O header é **opcional e recomendado** — a primeira versão o tornava obrigatório (422 se ausente), mas isso quebrava o contrato original do case (o curl do próprio KNOWN_ISSUES passava a falhar); revi para preservar compatibilidade: sem o header a API gera uma chave própria (`srv-…`) e a request não tem proteção contra reenvio. A garantia mora no índice único parcial `(company_id, idempotency_key)` com `INSERT ... ON CONFLICT DO NOTHING`. Se a chave já existe **com o mesmo payload**, a API devolve o job original: sem novo NOTIFY e sem passar de novo pelo limite de concorrência, que já foi pago na primeira. Mesma chave com payload **diferente** responde 409 (semântica padrão, como a do Stripe): devolver o job original em silêncio mascararia bug do cliente reutilizando chaves. A chave é reconsultada depois do lock da empresa, o que fecha a janela em que um replay concorrente poderia receber 429 se a primeira request ocupasse a última vaga. A chave é escopada por tenant. O front gera a chave por intenção e só renova após sucesso, então duplo-clique replay-a em vez de duplicar.
 
 - **Limite de concorrência com lock pessimista na company**: `FOR UPDATE` de uma linha, contenção limitada ao próprio tenant. Alternativa considerada: constraint/trigger, mais invasivo para uma regra que pode virar configurável.
 
@@ -182,7 +253,7 @@ ponta a ponta; como resolveu a corrida do cancelamento.)
 
 - **Testes contra Postgres real (testcontainers)**: as garantias centrais do case *são* comportamento de Postgres (SKIP LOCKED, ON CONFLICT, locks de linha), portanto evitei mocks e SQLite para testes.
 
-- **Busca por substring com trigram, não full-text**: a busca de `GET /jobs` é `kind ILIKE '%termo%'`. Full-text search (tsvector) casa lexemas e prefixos, não substring arbitrária — `%por%` não encontraria `report`. O índice correto é `pg_trgm` (migration `0012`): o pior caso (termo sem match, que varria a empresa inteira) caiu de 32ms para 0,02ms em 100k linhas, e quando o termo casa tudo o planner ignora o GIN e mantém o early-stop do índice de paginação. Medido no benchmark, plano a plano.
+### Decisões refinadas após o benchmark
 
 - **Fila própria vs bibliotecas de fila em Postgres**: avaliei pgqueuer, pgmq e pgque antes de manter a implementação. O pgqueuer usa exatamente os mesmos primitivos que o projeto já tem (LISTEN/NOTIFY + `SKIP LOCKED` + polling de fallback), o que valida o desenho, mas adotá-lo trocaria as regras de negócio do case (cancel cooperativo por job, limite por tenant, DLQ auditável, eventos com ator) por convenções genéricas de framework. O pgmq segue o modelo SQS de mensagem opaca com visibility timeout: os jobs aqui são linhas de domínio que a UI consulta por status e tenant, então eu terminaria com fila e tabela de estado separadas, o dual-system que o desenho atual elimina. O pgque é fan-out por event log com tick (~50ms de latência mediana, exige pg_cron), modelo errado para worker competindo por job. A crítica legítima que fica do pgque é o bloat de dead tuples em filas `SKIP LOCKED` sob churn alto — registrada como regra de operação na proposta de produção do README (monitorar autovacuum e arquivar jobs concluídos).
 
@@ -207,6 +278,8 @@ mal-feito.
 - **Broker dedicado (Redis/RabbitMQ/SQS)**: overkill para o volume do case. O desenho fila-na-tabela + NOTIFY chega longe e mantém tudo transacional com os dados. Shopify é um case real que usou MySQL ao invés de Redis para o sistema principal de reserva de estoque, com estratégias similares às utilizadas nesse case ([tech blog da Shopify](https://shopify.engineering/scaling-inventory-reservations)).
 
 - **E2E de frontend (Playwright)**: o front é intencionalmente mínimo.
+
+- **Branding do Swagger (`api/shared/http/docs.py`)**: mantido de propósito, sabendo que é escopo estético que o case não pede. É o maior arquivo "não funcional" da API, decidi manter porque documentação de contrato é a primeira porta de quem revisa a API e o custo de manutenção é nulo (não toca rota, schema nem query).
 
 - **Push em tempo real**: avaliado e rejeitado conscientemente, o raciocínio completo está em [§3](#3-trade-offs-e-decisões-de-design). Polling adaptativo foi a decisão: só acontece quando há job `queued`/`running` na tela e, em repouso, zero requests. Mutações e focus-refetch cobrem o resto.
 
@@ -235,7 +308,8 @@ mal-feito.
   - **O ORM**: o [TASKS.md](TASKS.md) é claro: "SQL cru via psycopg — mantenha o padrão (sem ORM)". Reverti para psycopg puro com pool, mantendo a arquitetura de services. As queries ficaram mais explícitas e o `EXPLAIN` bate 1:1 com o que está no código.
   - **Fila/pub-sub em camada de aplicação**: a sugestão inicial era polling puro e, depois, um broker externo. Rejeitei os dois e fui estudar o LISTEN/NOTIFY nativo do Postgres, pois já conhecia a capacidade e robustez. Para *sinalização* ele aguenta alto volume com custo mínimo e entrega no commit, exatamente o que eu precisava aqui, desde que não seja tratado como fila durável (payload 8KB, sem entrega garantida sem listener). A tabela continua sendo a fila e o NOTIFY substitui o polling. Ferramenta nativa, zero dependência nova, e o fallback de 30s cobre o caso de notify perdido.
   - **Índices especulativos** (status isolado, kind): o planner não os usaria com cardinalidade baixa e custariam escrita/RAM. Mantive só os que o `EXPLAIN` prova.
-
+  - **Busca por substring + índice trigram**: a IA sugeriu um parâmetro `search` com `kind ILIKE '%termo%'` na listagem e, depois, um GIN `pg_trgm` para torná-lo rápido. Recusei e removi a feature inteira, o case não pede busca, `kind` é na prática um vocabulário fechado (a UI só submete `report`). Era uma otimização tecnicamente correta de uma feature que não deveria existir — o erro estava uma camada acima do índice.
+  - **TRGM**: Existia um campo "kind" que após testes de benchmarks a IA perdeu o contexto e tentou otimizar algo que é "tipado" para realizar uma busca performática por termo/relevância, mas o kind não é por exemplo o nome de um produto e sim um tipo, usar TRGM ou até mesmo mecanismos parecidos com FULLTEXT Index seria anti-pattern / overengineer.
 ---
 
 ## 6. Casos de borda
@@ -280,6 +354,8 @@ O que você faria a seguir.
 - **E2E de front (Playwright)** cobrindo cancelar/retry pela UI. A bateria adversarial cobre a API, mas o clique do usuário ainda depende de revisão manual.
 
 - **Broker dedicado (SQS/RabbitMQ)** apenas se o volume tornar o Postgres o gargalo. O desenho fila-na-tabela + NOTIFY existe justamente para adiar essa troca sem reescrever o worker.
+
+- **Tracing distribuído (W3C `traceparent`/OpenTelemetry)**: hoje o rastreio é por correlation-id gerado na borda (`X-Request-ID` → `trace_id`), suficiente para um serviço só.
 
 - **Baratear o `count(*)` do `X-Total-Count`**: o benchmark mostrou que, com a listagem otimizada, o total exato virou 97% do tempo de banco do caminho de leitura (24ms por página a 100k jobs). Alavancas possíveis: cachear o total por tenant, estimar acima de um teto com `reltuples` ou tornar o header opcional. Mantive o exato de propósito, correto e barato o suficiente no volume do case.
 

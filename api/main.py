@@ -76,10 +76,12 @@ recursos de outro tenant respondem `404`.
 
 ## Idempotência
 
-O header **`Idempotency-Key`** no `POST /jobs` é **obrigatório** (`422` se ausente):
-repetir a mesma chave (por empresa) devolve o job original em vez de criar outro —
-proteção contra duplo-clique e retry de rede. Cancel e retry são
-idempotentes por estado: a segunda chamada responde `409`.
+O header **`Idempotency-Key`** no `POST /jobs` é **opcional, recomendado**:
+repetir a mesma chave (por empresa) com o mesmo payload devolve o job original em
+vez de criar outro — proteção contra duplo-clique e retry de rede. A mesma chave
+com payload diferente responde `409`. Sem o header, a API gera uma chave própria
+(sem proteção contra reenvio). Cancel e retry são idempotentes por estado: a
+segunda chamada responde `409`.
 
 ## Erros
 
@@ -91,6 +93,11 @@ idempotentes por estado: a segunda chamada responde `409`.
 | `409` | Transição de estado inválida (cancelar `done`, retry sem ser `failed`, máximo de tentativas) |
 | `422` | Validação: tipos/formatos/faixas errados, com o campo apontado em `detail` |
 | `429` | Limite de jobs concorrentes da empresa atingido |
+| `503` | Servidor encerrando (graceful shutdown) — repita em outra réplica |
+
+Toda resposta carrega o header **`X-Request-ID`** — o mesmo id gravado como
+`trace_id` do job quando a operação cria/cancela/reprocessa. Em erros que não
+tocam job (`401`/`422`/`429`), é o elo entre a resposta e o log da API.
 """
 
 TAGS_METADATA = [
@@ -115,14 +122,6 @@ app = FastAPI(
     },
 )
 install_branded_docs(app)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[o.strip() for o in get_settings().cors_origins.split(",") if o.strip()],
-    allow_methods=["GET", "POST"],
-    allow_headers=["X-Auth", "Content-Type", "Idempotency-Key"],
-    expose_headers=["X-Total-Count"],
-    max_age=600,
-)
 
 
 @app.get("/health", include_in_schema=False)
@@ -132,20 +131,34 @@ def health() -> dict[str, str]:
 
 @app.middleware("http")
 async def request_lifecycle_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
-    if not await shutdown.request_started():
-        return JSONResponse({"detail": "servidor encerrando"}, status_code=503, headers={"Connection": "close"})
+    request_id = str(uuid.uuid4())
     event = start_event(
         SERVICE,
         "http_request",
-        request_id=str(uuid.uuid4()),
+        request_id=request_id,
         http_method=request.method,
         http_path=request.url.path,
     )
     started = time.perf_counter()
+    if not await shutdown.request_started():
+        status = 503
+        event.error(http_status=status, shutdown_rejected=True)
+        if not request.url.path.startswith("/metrics"):
+            http_request_duration_seconds.labels(method=request.method, route="unmatched", status=str(status)).observe(
+                time.perf_counter() - started
+            )
+        if should_emit_request_log(request.url.path, get_settings().log_suppress_probe_routes, status):
+            event.emit()
+        return JSONResponse(
+            {"detail": "servidor encerrando"},
+            status_code=status,
+            headers={"Connection": "close", "X-Request-ID": request_id},
+        )
     status = 500
     http_requests_in_flight.inc()
     try:
         response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
         status = response.status_code
         event.add(http_status=status)
         if status >= 500:
@@ -166,6 +179,15 @@ async def request_lifecycle_middleware(request: Request, call_next: Callable[[Re
             event.emit()
         await shutdown.request_finished()
 
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in get_settings().cors_origins.split(",") if o.strip()],
+    allow_methods=["GET", "POST"],
+    allow_headers=["X-Auth", "Content-Type", "Idempotency-Key"],
+    expose_headers=["X-Total-Count", "X-Request-ID"],
+    max_age=600,
+)
 
 app.include_router(jobs_router)
 app.include_router(admin_router)
