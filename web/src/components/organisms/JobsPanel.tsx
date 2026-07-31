@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, fetchJobsPage, post } from "../../api";
 import { useDelayedLoading } from "../../hooks/useDelayedLoading";
 import {
+  clampPage,
   invalidateJobMutationCaches,
   jobQueryKeys,
   shouldPollActiveJobs,
@@ -27,12 +28,16 @@ export function JobsPanel({ auth }: { auth: string }) {
   const [expanded, setExpanded] = useState<number | null>(null);
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [highlightId, setHighlightId] = useState<number | null>(null);
+  const [appliedAuth, setAppliedAuth] = useState(auth);
+  const authChanged = appliedAuth !== auth;
+  const visiblePage = authChanged ? 0 : page;
+  const visibleExpanded = authChanged ? null : expanded;
 
-  const params = new URLSearchParams({ limit: String(pageSize), offset: String(page * pageSize) });
+  const params = new URLSearchParams({ limit: String(pageSize), offset: String(visiblePage * pageSize) });
   if (status) params.set("status", status);
 
   const { data, isLoading } = useQuery<JobsPage>({
-    queryKey: jobQueryKeys.page(auth, page, pageSize, status),
+    queryKey: jobQueryKeys.page(auth, visiblePage, pageSize, status),
     queryFn: ({ signal }) => fetchJobsPage(auth, params, signal),
     // polling apenas com itens pendentes (queued/running); em repouso não há polling —
     // mutações invalidam a query e o refetch-on-focus cobre mudanças externas
@@ -44,6 +49,19 @@ export function JobsPanel({ auth }: { auth: string }) {
     setPage(0);
     setExpanded(null);
   };
+  useEffect(() => {
+    if (!authChanged) return;
+    setAppliedAuth(auth);
+    setPage(0);
+    setExpanded(null);
+  }, [auth, authChanged]);
+  useEffect(() => {
+    if (!data || authChanged) return;
+    const nextPage = clampPage(page, pageSize, data.total);
+    if (nextPage === page) return;
+    setPage(nextPage);
+    setExpanded(null);
+  }, [authChanged, data, page, pageSize]);
   const invalidateList = () => queryClient.invalidateQueries({ queryKey: jobQueryKeys.list(auth) });
   const invalidateMutation = (variables: JobMutationVariables) =>
     invalidateJobMutationCaches(
@@ -82,6 +100,7 @@ export function JobsPanel({ auth }: { auth: string }) {
   const total = data?.total ?? 0;
   const jobs = data?.jobs ?? [];
   const filtering = Boolean(status);
+  const displayPage = data && !authChanged ? clampPage(visiblePage, pageSize, data.total) : visiblePage;
 
   return (
     <Card title="Jobs" actions={<SubmitButton auth={auth} onCreated={onCreated} />}>
@@ -96,7 +115,7 @@ export function JobsPanel({ auth }: { auth: string }) {
         <SkeletonList rows={Math.min(pageSize, 6)} />
       ) : jobs.length === 0 ? (
         <p className="empty">
-          {filtering ? "Nenhum job encontrado com esses filtros." : page === 0 ? "Nenhum job por aqui ainda." : "Fim da lista."}
+          {filtering ? "Nenhum job encontrado com esses filtros." : displayPage === 0 ? "Nenhum job por aqui ainda." : "Fim da lista."}
         </p>
       ) : (
         <ul className="job-list">
@@ -104,20 +123,20 @@ export function JobsPanel({ auth }: { auth: string }) {
             <li key={j.id} className={highlightId === j.id ? "job-new" : undefined}>
               <JobRow
                 job={j}
-                expanded={expanded === j.id}
-                onToggle={() => setExpanded(expanded === j.id ? null : j.id)}
+                expanded={visibleExpanded === j.id}
+                onToggle={() => setExpanded(visibleExpanded === j.id ? null : j.id)}
                 onCancel={() => cancel.mutate({ auth, jobId: j.id })}
                 onRetry={() => retry.mutate({ auth, jobId: j.id })}
                 busy={(cancel.isPending && cancel.variables?.jobId === j.id) || (retry.isPending && retry.variables?.jobId === j.id)}
               />
-              {expanded === j.id && <JobDetailPanel auth={auth} jobId={j.id} />}
+              {visibleExpanded === j.id && <JobDetailPanel auth={auth} jobId={j.id} />}
             </li>
           ))}
         </ul>
       )}
       {total > 0 && (
         <Pagination
-          page={page}
+          page={displayPage}
           pageSize={pageSize}
           total={total}
           onPage={setPage}

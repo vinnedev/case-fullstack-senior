@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  clampPage,
+  hasCompanyJobsScopeChanged,
   getJobMutationInvalidationKeys,
+  getQueryErrorMessage,
   isPaginationNeeded,
   invalidateJobMutationCaches,
   jobQueryKeys,
@@ -122,6 +125,28 @@ test("centraliza as chaves de cache dos jobs", () => {
   assert.deepEqual(jobQueryKeys.result("token", 17), ["job-result", "token", 17]);
 });
 
+test("limita a página ao último resultado disponível", () => {
+  assert.equal(clampPage(0, 10, 0), 0);
+  assert.equal(clampPage(2, 10, 21), 2);
+  assert.equal(clampPage(2, 10, 20), 1);
+  assert.equal(clampPage(3, 10, 1), 0);
+});
+
+test("reinicia a página de jobs administrativos ao trocar tenant, empresa ou filtro", () => {
+  const baseScope = { auth: "tenant-a", companyId: 1, status: null };
+  assert.equal(hasCompanyJobsScopeChanged(baseScope, baseScope), false);
+  assert.equal(hasCompanyJobsScopeChanged(baseScope, { ...baseScope, auth: "tenant-b" }), true);
+  assert.equal(hasCompanyJobsScopeChanged(baseScope, { ...baseScope, companyId: 2 }), true);
+  assert.equal(hasCompanyJobsScopeChanged(baseScope, { ...baseScope, status: "running" }), true);
+  assert.equal(clampPage(3, 5, 1), 0);
+});
+
+test("preserva detalhes de erro HTTP e oculta falhas inesperadas de consulta", () => {
+  const apiError = Object.assign(new Error("acesso negado"), { status: 403 });
+  assert.equal(getQueryErrorMessage(apiError, "falha ao carregar"), "acesso negado");
+  assert.equal(getQueryErrorMessage(new Error("falha de rede"), "falha ao carregar"), "falha ao carregar");
+});
+
 test("invalida lista, detalhe e resultado do job mutado", async () => {
   const invalidated = [];
   const variables = { auth: "token", jobId: 17 };
@@ -152,9 +177,9 @@ test("faz polling do detalhe somente enquanto o job estiver ativo", () => {
 });
 
 test("paginação só aparece quando há mais itens que a página comporta", () => {
-  assert.equal(isPaginationNeeded(0, 10, 8), false); // tudo cabe numa página
-  assert.equal(isPaginationNeeded(0, 10, 10), false); // exatamente uma página
-  assert.equal(isPaginationNeeded(0, 10, 11), true); // transborda para a página 2
-  assert.equal(isPaginationNeeded(2, 10, 5), true); // fora da 1ª página precisa voltar
-  assert.equal(isPaginationNeeded(0, 5, 0), false); // lista vazia
+  assert.equal(isPaginationNeeded(0, 10, 8), false);
+  assert.equal(isPaginationNeeded(0, 10, 10), false);
+  assert.equal(isPaginationNeeded(0, 10, 11), true);
+  assert.equal(isPaginationNeeded(2, 10, 5), true);
+  assert.equal(isPaginationNeeded(0, 5, 0), false);
 });

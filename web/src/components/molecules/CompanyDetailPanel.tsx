@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { fetchPage } from "../../api";
 import type { Page } from "../../api";
 import { useDelayedLoading } from "../../hooks/useDelayedLoading";
+import { clampPage, getQueryErrorMessage, hasCompanyJobsScopeChanged } from "../../jobQueries";
+import type { CompanyJobsScope } from "../../jobQueries";
 import { parseAdminJobs } from "../../types";
 import type { AdminCompany, AdminJob, JobStatus } from "../../types";
 import { Badge } from "../atoms/Badge";
@@ -15,21 +17,40 @@ export function CompanyDetailPanel({ auth, company }: { auth: string; company: A
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(JOBS_PAGE_SIZE);
   const [status, setStatus] = useState<JobStatus | null>(null);
+  const currentScope: CompanyJobsScope = { auth, companyId: company.id, status };
+  const [appliedScope, setAppliedScope] = useState(currentScope);
+  const scopeChanged = hasCompanyJobsScopeChanged(appliedScope, currentScope);
+  const visiblePage = scopeChanged ? 0 : page;
 
   const params = new URLSearchParams({
     company_id: String(company.id),
     limit: String(pageSize),
-    offset: String(page * pageSize),
+    offset: String(visiblePage * pageSize),
   });
   if (status) params.set("status", status);
 
-  const { data, isLoading } = useQuery<Page<AdminJob>>({
-    queryKey: ["admin-company-jobs", auth, company.id, page, pageSize, status],
+  const { data, isLoading, isError, error } = useQuery<Page<AdminJob>>({
+    queryKey: ["admin-company-jobs", auth, company.id, visiblePage, pageSize, status],
     queryFn: ({ signal }) => fetchPage(`/admin/jobs?${params.toString()}`, auth, parseAdminJobs, signal),
   });
   const showSkeleton = useDelayedLoading(isLoading);
+  const hasReplacementError = isError && !data;
+  const hasBackgroundError = isError && Boolean(data);
   const jobs = data?.items ?? [];
   const total = data?.total ?? 0;
+  const displayPage = data && !scopeChanged ? clampPage(visiblePage, pageSize, data.total) : visiblePage;
+
+  useEffect(() => {
+    if (!scopeChanged) return;
+    setAppliedScope({ auth, companyId: company.id, status });
+    setPage(0);
+  }, [auth, company.id, scopeChanged, status]);
+  useEffect(() => {
+    if (!data || scopeChanged) return;
+    const nextPage = clampPage(page, pageSize, data.total);
+    if (nextPage === page) return;
+    setPage(nextPage);
+  }, [data, page, pageSize, scopeChanged]);
 
   return (
     <div className="job-detail">
@@ -51,11 +72,20 @@ export function CompanyDetailPanel({ auth, company }: { auth: string; company: A
           setPage(0);
         }}
       />
+      {hasBackgroundError && (
+        <p className="empty job-error" role="alert">
+          {getQueryErrorMessage(error, "Não foi possível atualizar os jobs da empresa. Tente novamente.")}
+        </p>
+      )}
       {showSkeleton ? (
         <div className="job-detail-skeleton">
           <span className="skeleton skeleton-text" />
           <span className="skeleton skeleton-text" />
         </div>
+      ) : hasReplacementError ? (
+        <p className="empty job-error" role="alert">
+          {getQueryErrorMessage(error, "Não foi possível carregar os jobs da empresa. Tente novamente.")}
+        </p>
       ) : jobs.length === 0 ? (
         <p className="empty">{status ? "Nenhum job com esse status." : "Nenhum job por aqui ainda."}</p>
       ) : (
@@ -71,7 +101,7 @@ export function CompanyDetailPanel({ auth, company }: { auth: string; company: A
       )}
       {total > 0 && (
         <Pagination
-          page={page}
+          page={displayPage}
           pageSize={pageSize}
           total={total}
           onPage={setPage}

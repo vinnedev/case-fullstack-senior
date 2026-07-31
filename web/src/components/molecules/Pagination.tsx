@@ -14,7 +14,6 @@ type Props = {
 };
 
 export function Pagination({ page, pageSize, total, onPage, onPageSize, itemNoun = ["job", "jobs"] }: Props) {
-  // Some quando tudo cabe numa única página: sem o que paginar, sem controles.
   if (!isPaginationNeeded(page, pageSize, total)) return null;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   return (

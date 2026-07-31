@@ -22,14 +22,33 @@ export type JobMutationVariables = Readonly<{
   jobId: number;
 }>;
 
+export type CompanyJobsScope = Readonly<{
+  auth: string;
+  companyId: number;
+  status: JobStatus | null;
+}>;
+
 export function shouldPollActiveJobs(status: JobStatus | undefined): boolean {
   return status !== undefined && ACTIVE_JOB_STATUSES.has(status);
 }
 
 export function isPaginationNeeded(page: number, pageSize: number, total: number): boolean {
-  // Fora da primeira página os controles são necessários para voltar,
-  // mesmo que o total tenha diminuído (ex.: filtro aplicado ou item removido).
   return page > 0 || total > pageSize;
+}
+
+export function clampPage(page: number, pageSize: number, total: number): number {
+  return Math.min(page, Math.max(0, Math.ceil(total / pageSize) - 1));
+}
+
+export function hasCompanyJobsScopeChanged(previous: CompanyJobsScope, next: CompanyJobsScope): boolean {
+  return previous.auth !== next.auth || previous.companyId !== next.companyId || previous.status !== next.status;
+}
+
+export function getQueryErrorMessage(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  const status = (error as { status?: unknown }).status;
+  if (typeof status !== "number" || status < 400 || status > 599 || error.message.trim().length === 0) return fallback;
+  return error.message;
 }
 
 export function getJobMutationInvalidationKeys({ auth, jobId }: JobMutationVariables): readonly JobMutationCacheKey[] {

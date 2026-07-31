@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { fetchPage } from "../../api";
 import type { Page } from "../../api";
 import { useDelayedLoading } from "../../hooks/useDelayedLoading";
+import { getQueryErrorMessage } from "../../jobQueries";
 import { parseAdminCompanies } from "../../types";
 import type { AdminCompany } from "../../types";
 import { Card } from "../atoms/Card";
@@ -15,12 +16,14 @@ export function AdminPanel({ auth }: { auth: string }) {
   const [pageSize, setPageSize] = useState(10);
   const [selected, setSelected] = useState<number | null>(null);
 
-  const { data, isLoading } = useQuery<Page<AdminCompany>>({
+  const { data, isLoading, isError, error } = useQuery<Page<AdminCompany>>({
     queryKey: ["admin-companies", auth, page, pageSize],
     queryFn: ({ signal }) =>
       fetchPage(`/admin/companies?limit=${pageSize}&offset=${page * pageSize}`, auth, parseAdminCompanies, signal),
   });
   const showSkeleton = useDelayedLoading(isLoading);
+  const hasReplacementError = isError && !data;
+  const hasBackgroundError = isError && Boolean(data);
   const companies = data?.items ?? [];
   const total = data?.total ?? 0;
   const selectedCompany = companies.find((company) => company.id === selected) ?? null;
@@ -28,6 +31,11 @@ export function AdminPanel({ auth }: { auth: string }) {
   return (
     <Card title="Visão administrativa">
       <p className="empty">Empresas lado a lado com o resumo de processamento. Clique numa empresa para ver os jobs.</p>
+      {hasBackgroundError && (
+        <p className="empty job-error" role="alert">
+          {getQueryErrorMessage(error, "Não foi possível atualizar as empresas. Tente novamente.")}
+        </p>
+      )}
       {showSkeleton ? (
         <div className="company-grid" role="status" aria-label="Carregando">
           {Array.from({ length: 4 }, (_, i) => (
@@ -37,6 +45,10 @@ export function AdminPanel({ auth }: { auth: string }) {
             </div>
           ))}
         </div>
+      ) : hasReplacementError ? (
+        <p className="empty job-error" role="alert">
+          {getQueryErrorMessage(error, "Não foi possível carregar as empresas. Tente novamente.")}
+        </p>
       ) : companies.length === 0 ? (
         <p className="empty">{page === 0 ? "Nenhuma empresa cadastrada." : "Fim da lista."}</p>
       ) : (
