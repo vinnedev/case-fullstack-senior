@@ -21,7 +21,6 @@ def test_admin_jobs_paginates(client, seeded):
 
 
 def test_admin_jobs_keeps_original_case_contract(client, seeded):
-    # docs/case/README.md: [{"id": ..., "company_id": ..., "status": ...}]
     rows = client.get("/admin/jobs", headers={"X-Auth": "1:admin"}).json()
     assert [set(row) for row in rows] == [{"id", "company_id", "status"}] * len(rows)
     assert [row["id"] for row in rows] == sorted(row["id"] for row in rows)

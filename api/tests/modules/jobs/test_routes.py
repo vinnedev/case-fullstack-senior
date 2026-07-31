@@ -186,7 +186,6 @@ def test_list_jobs_filters_by_status(client, seeded):
 
 
 def test_retry_backfills_missing_trace_id(client, seeded, db):
-    # jobs legados (seed) nascem sem trace; o retry os torna rastreáveis
     resp = client.post("/jobs/4/retry", headers=HEADERS)
     assert resp.status_code == 200
     stored = db.execute("SELECT trace_id FROM jobs WHERE id = 4").fetchone()["trace_id"]

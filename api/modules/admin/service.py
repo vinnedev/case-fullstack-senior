@@ -8,8 +8,6 @@ class AdminService:
         self._conn = conn
 
     def list_companies(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        # Pagina as empresas ANTES de agregar: agregar a tabela jobs inteira e
-        # só então aplicar LIMIT repetiria a causa raiz do sintoma 1.
         return self._conn.execute(
             """
             SELECT c.id, c.name, c.max_concurrent_jobs, c.job_quota,
@@ -43,7 +41,6 @@ class AdminService:
         company_id: int | None = None,
         status: str | None = None,
     ) -> list[dict[str, Any]]:
-        # Contrato do case original: colunas e ordenação por id preservadas.
         return self._conn.execute(
             """
             SELECT id, company_id, status

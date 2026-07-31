@@ -100,7 +100,7 @@ class TestR1AuthMandatory:
 
 class TestR2IdempotencyKey:
     def test_missing_key_creates_job_with_server_generated_key(self, client, seeded, db):
-        client.post("/jobs/2/cancel", headers=USER)  # libera vaga no limite de concorrência
+        client.post("/jobs/2/cancel", headers=USER)
         resp = client.post("/jobs", json={"kind": "x"}, headers=USER)
         assert resp.status_code == 201
         stored = db.execute("SELECT idempotency_key FROM jobs WHERE id = %s", (resp.json()["id"],)).fetchone()
@@ -116,9 +116,7 @@ class TestR2IdempotencyKey:
         assert resp.status_code == 422
 
     def test_replay_with_different_body_is_conflict(self, client, seeded, db):
-        # semântica padrão de idempotência: mesma chave + payload diferente é
-        # erro do cliente (409), nunca replay silencioso do job original
-        client.post("/jobs/2/cancel", headers=USER)  # libera vaga no limite de concorrência
+        client.post("/jobs/2/cancel", headers=USER)
         client.post("/jobs/7/cancel", headers=USER)
         headers = {**USER, "Idempotency-Key": "replay-diff"}
         first = client.post("/jobs", json={"kind": "original"}, headers=headers)
@@ -175,15 +173,12 @@ class TestR4AdminRole:
         assert client.post("/jobs/3/retry", headers=ADMIN).status_code == 404
 
     def test_admin_role_does_not_grant_cross_tenant_reads(self, client, seeded):
-        # /admin expõe só a visão administrativa (id/status/contagens); o job e
-        # o RESULTADO SENSÍVEL de outra empresa continuam 404 mesmo para admin
         assert client.get("/jobs/3", headers=ADMIN).status_code == 404
         assert client.get("/jobs/3/result", headers=ADMIN).status_code == 404
         ids = {j["id"] for j in client.get("/jobs?limit=200", headers=ADMIN).json()}
         assert 3 not in ids
 
     def test_admin_overview_never_exposes_payloads(self, client, seeded):
-        # nem /admin/jobs nem /admin/companies carregam payload/kind/erro de job
         for path in ("/admin/jobs", "/admin/companies"):
             for row in client.get(path, headers=ADMIN).json():
                 assert "payload" not in row and "last_error" not in row and "kind" not in row
@@ -287,7 +282,7 @@ class TestR9NoInjection:
     )
     def test_kind_injection_stored_literally(self, client, seeded, db, payload):
         headers = {**USER, "Idempotency-Key": f"inj-{hash(payload)}"}
-        client.post("/jobs/2/cancel", headers=USER)  # libera vaga no limite
+        client.post("/jobs/2/cancel", headers=USER)
         resp = client.post("/jobs", json={"kind": payload}, headers=headers)
         if resp.status_code == 201:
             stored = db.execute("SELECT kind FROM jobs WHERE id = %s", (resp.json()["id"],)).fetchone()["kind"]
@@ -371,8 +366,6 @@ class TestR12OpenApiContract:
                 assert "503" in op["responses"], f"{method.upper()} {path} sem 503 (graceful shutdown) documentado"
 
     def test_declared_error_responses_match_route_behavior(self, client):
-        # espelho 1:1 do que cada rota pode devolver de fato; divergência aqui
-        # significa Swagger mentindo (código possível não documentado, ou o inverso)
         expected = {
             ("get", "/jobs"): {"401", "422", "503"},
             ("get", "/jobs/{job_id}"): {"401", "404", "422", "503"},

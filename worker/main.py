@@ -22,8 +22,6 @@ shutdown = Event()
 
 
 def _request_shutdown(_signum: int, _frame: object) -> None:
-    # Assinatura exigida por signal.signal; só sinaliza — o job em andamento
-    # termina e o loop sai antes do próximo claim.
     shutdown.set()
 
 
@@ -50,8 +48,6 @@ def _reconnect_listener() -> psycopg.Connection | None:
 
 
 def _next_poll_timeout() -> float:
-    # O NOTIFY do retry chega antes do backoff vencer; encurtar a espera até o
-    # próximo next_attempt_at evita que o job aguarde o fallback inteiro (30s).
     with connection_scope() as conn:
         pending = seconds_until_next_attempt(conn)
     if pending is None:
@@ -60,7 +56,6 @@ def _next_poll_timeout() -> float:
 
 
 def _wait_for_work(listen_conn: psycopg.Connection, timeout: float) -> bool:
-    # Fatias curtas para reagir ao SIGTERM sem esperar o fallback inteiro.
     deadline = time.monotonic() + timeout
     while not shutdown.is_set():
         remaining = min(WAIT_SLICE_S, deadline - time.monotonic())

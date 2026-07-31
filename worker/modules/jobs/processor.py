@@ -38,6 +38,10 @@ class CancellationMonitorTimeoutError(RuntimeError):
     pass
 
 
+class FatalCancellationMonitorError(RuntimeError):
+    pass
+
+
 class CancellationToken:
     def __init__(self) -> None:
         self._cancelled = Event()
@@ -54,8 +58,6 @@ class CancellationToken:
 
 
 def _cancellation_arrived(conn: DictConnection, job_id: int, timeout: float) -> bool:
-    # O canal é compartilhado por todos os jobs: só o payload identifica qual
-    # job foi cancelado. Ignorar o payload cancelaria o job errado.
     for notify in conn.notifies(timeout=timeout):
         if notify.payload == str(job_id):
             return True
@@ -63,8 +65,6 @@ def _cancellation_arrived(conn: DictConnection, job_id: int, timeout: float) -> 
 
 
 def _release_listen(conn: DictConnection) -> None:
-    # A assinatura é de sessão e sobrevive à devolução ao pool: sem UNLISTEN,
-    # uma conexão reciclada entregaria notificações velhas ao monitor de outro job.
     with suppress(Exception):
         conn.execute("UNLISTEN *")
         conn.commit()
@@ -151,17 +151,18 @@ def cancellation_monitor(
         close_monitor_connection()
         thread.join(stop_timeout_s)
         if thread.is_alive():
-            exc = CancellationMonitorTimeoutError(f"monitor de cancelamento do job {job['id']} não encerrou dentro do timeout")
+            exc = FatalCancellationMonitorError(
+                f"monitor de cancelamento do job {job['id']} não encerrou após fechamento forçado da conexão"
+            )
             record_monitor_error(exc)
             WideEvent(SERVICE, "cancellation_monitor_error", job_id=job["id"]).error(exc).emit()
+            raise exc
 
     if not ready.wait(startup_timeout_s):
         exc = CancellationMonitorTimeoutError(f"monitor de cancelamento do job {job['id']} não ficou pronto dentro do timeout")
         record_monitor_error(exc)
         stop_monitor()
-        raise CancellationMonitorSetupError(
-            f"monitor de cancelamento do job {job['id']} não iniciou: {type(exc).__name__}: {exc}"
-        ) from exc
+        raise CancellationMonitorSetupError(f"monitor de cancelamento do job {job['id']} não iniciou: {type(exc).__name__}: {exc}") from exc
 
     monitor_error: Exception | None = job.get("cancellation_monitor_error")
     if not setup_succeeded.is_set():
@@ -214,8 +215,6 @@ def lease_heartbeat(
     token: CancellationToken | None = job.get("cancel_token")
 
     def give_up(exc: Exception) -> None:
-        # Sem lease garantida outro worker pode reivindicar o job; abortar o
-        # trabalho local no próximo checkpoint evita esforço descartado.
         errors.append(exc)
         job["heartbeat_error"] = exc
         if token is not None:
@@ -250,11 +249,6 @@ def lease_heartbeat(
 
 
 def seconds_until_next_attempt(conn: DictConnection) -> float | None:
-    """Segundos até o backoff mais próximo vencer; None se não há job agendado.
-
-    O NOTIFY do retry chega antes do backoff vencer e nada notifica no
-    vencimento — sem este valor, o job esperaria o polling de fallback inteiro.
-    """
     row = conn.execute(
         """
         SELECT extract(epoch FROM min(next_attempt_at) - now()) AS s
@@ -359,8 +353,6 @@ def _finalize(conn: DictConnection, job: dict[str, Any]) -> str:
 
 
 def _acknowledge_cancellation(conn: DictConnection, job: dict[str, Any]) -> bool:
-    # O cancel da API já limpa worker_id/locked_at, então o reconhecimento é
-    # pelo status real do job; o UPDATE abaixo só cobre lease residual.
     with conn.transaction():
         row = conn.execute("SELECT status FROM jobs WHERE id = %s", (job["id"],)).fetchone()
         conn.execute(
@@ -429,8 +421,6 @@ def _execute(conn: DictConnection, job: dict[str, Any]) -> None:
             token.raise_if_cancelled()
             time.sleep(work_s / 10)
     token.raise_if_cancelled()
-    # Transação própria: sem ela o SELECT abriria uma transação implícita e o
-    # finalize rodaria como savepoint, adiando o commit real para o teardown.
     with conn.transaction():
         company = conn.execute("SELECT id FROM companies WHERE id = %s", (job["company_id"],)).fetchone()
     if company is None:
@@ -472,8 +462,6 @@ def process_next(
             outcome = "cancelled"
             event.add(outcome=outcome)
         else:
-            # Token disparado sem cancelamento real (ex.: lease perdida pelo
-            # heartbeat): registrar como falha em vez de deixar o job órfão.
             cause = (
                 job.get("heartbeat_error")
                 or job.get("cancellation_monitor_error")
@@ -481,6 +469,11 @@ def process_next(
             )
             status = _record_failure(conn, job, cause)
             event.error(cause, outcome="failed", job_status=status)
+    except FatalCancellationMonitorError as exc:
+        conn.rollback()
+        status = _record_failure(conn, job, exc)
+        event.error(exc, outcome="failed", job_status=status)
+        raise
     except Exception as exc:
         conn.rollback()
         status = _record_failure(conn, job, exc)

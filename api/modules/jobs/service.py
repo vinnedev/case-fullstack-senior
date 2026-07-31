@@ -174,8 +174,6 @@ class JobsService:
 
     @staticmethod
     def _replay(existing: dict[str, Any], kind: str) -> dict[str, Any]:
-        # Semântica padrão de idempotência: mesma chave com payload diferente é
-        # erro do cliente, não replay — devolver o job original mascararia o bug.
         if existing["kind"] != kind:
             raise IdempotencyKeyConflictError(existing["kind"])
         return {"id": existing["id"], "status": existing["status"]}

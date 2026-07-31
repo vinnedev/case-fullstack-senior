@@ -66,11 +66,6 @@ def run_migrations(database_url: str | None = None, directory: Path | None = Non
 
 
 def rollback_migrations(database_url: str | None = None, directory: Path | None = None, steps: int = 1) -> list[str]:
-    """Reverte as últimas `steps` migrations aplicadas, na ordem inversa.
-
-    Cada versão exige o arquivo companheiro `<versao>.down.sql`; a remoção do
-    ledger acontece na mesma transação do SQL de reversão.
-    """
     directory = directory or migrations_dir()
     reverted: list[str] = []
     with psycopg.connect(database_url or get_settings().database_url) as conn:
