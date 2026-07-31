@@ -48,7 +48,6 @@ def test_up_down_full_cycle(migrate_db):
     assert applied_versions(migrate_db) == []
     assert table_names(migrate_db) == {"schema_migrations"}
 
-    # up de novo após o down total: ciclo completo reprodutível
     assert run_migrations(database_url=migrate_db) == applied
 
 
@@ -56,21 +55,19 @@ def test_down_single_step_reverts_only_the_last(migrate_db):
     applied = run_migrations(database_url=migrate_db)
     assert rollback_migrations(database_url=migrate_db, steps=1) == [applied[-1]]
     assert applied_versions(migrate_db) == applied[:-1]
-    # reaplicar só a última volta ao estado completo
     assert run_migrations(database_url=migrate_db) == [applied[-1]]
 
 
 def test_down_preserves_data_of_untouched_migrations(migrate_db):
-    run_migrations(database_url=migrate_db)
+    applied = run_migrations(database_url=migrate_db)
     with psycopg.connect(migrate_db) as conn:
         conn.execute("INSERT INTO companies (id, name) VALUES (1, 'Acme')")
         conn.execute("INSERT INTO jobs (company_id, kind, status) VALUES (1, 'report', 'cancelled')")
         conn.commit()
-    # reverte até antes da 0004 (status 'cancelled' deixa de existir no domínio)
-    rollback_migrations(database_url=migrate_db, steps=8)
+    rollback_migrations(database_url=migrate_db, steps=len(applied) - 3)
     with psycopg.connect(migrate_db) as conn:
         row = conn.execute("SELECT status, last_error FROM jobs").fetchone()
-        assert row is not None and row[0] == "failed"  # mapeado pelo down da 0004
+        assert row is not None and row[0] == "failed"
         assert row[1] is not None and "0004" in row[1]
         companies = conn.execute("SELECT count(*) FROM companies").fetchone()
         assert companies is not None and companies[0] == 1
@@ -83,10 +80,30 @@ def test_down_without_file_fails_loudly(migrate_db, tmp_path):
         conn.commit()
     with pytest.raises(FileNotFoundError, match="9999_sem_down"):
         rollback_migrations(database_url=migrate_db, steps=1)
-    # nada foi revertido: o ledger continua íntegro
     assert "9999_sem_down" in applied_versions(migrate_db)
 
 
 def test_down_files_are_never_applied_as_up(migrate_db):
     applied = run_migrations(database_url=migrate_db)
     assert all(not version.endswith(".down") for version in applied)
+
+
+def test_second_run_is_a_noop(migrate_db):
+    first = run_migrations(database_url=migrate_db)
+    assert len(first) >= 11
+    tables_after_first = table_names(migrate_db)
+    assert run_migrations(database_url=migrate_db) == []
+    assert applied_versions(migrate_db) == first
+    assert table_names(migrate_db) == tables_after_first
+
+
+def test_concurrent_runners_apply_each_migration_exactly_once(migrate_db):
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: run_migrations(database_url=migrate_db), range(2)))
+    applied = [version for result in results for version in result]
+    assert sorted(applied) == applied_versions(migrate_db)  # sem duplicata entre os dois runners
+    with psycopg.connect(migrate_db) as conn:
+        row = conn.execute("SELECT count(*), count(DISTINCT version) FROM schema_migrations").fetchone()
+        assert row is not None and row[0] == row[1]
