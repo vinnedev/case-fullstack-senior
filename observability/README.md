@@ -123,13 +123,26 @@ tempo total/médio, chamadas e blocos lidos. O dashboard **Performance
 Investigation** complementa isso com a query SQL completa e uma tabela de
 queries bloqueadas/bloqueadoras via datasource Postgres.
 
-### Containers (cAdvisor)
+### Recursos (cAdvisor + process_*)
 
-O cAdvisor coleta CPU, memória residente, limite de memória, rede e ciclo de
-vida dos containers. O dashboard **Resources** permite identificar saturação de
-CPU, vazamento de memória e tráfego anormal por serviço. Em Docker Desktop, a
-visibilidade de nomes de containers pode depender do backend; em Linux com
-Docker, os labels padrão do cAdvisor são usados.
+Recursos são medidos em duas camadas, e ambas funcionam em qualquer máquina:
+
+- **Host** (cgroup raiz do cAdvisor): CPU, memória, **rede** (RX/TX) e
+  **disco** (leitura/escrita) — quatro métricas distintas, no topo do dashboard
+  **Resources** como stats e como séries temporais.
+- **Por serviço** (`process_cpu_seconds_total` e `process_resident_memory_bytes`,
+  exportados pelo próprio processo da api e do worker): CPU e RAM por serviço,
+  independentes do runtime de containers.
+
+Cada dashboard de serviço (API, Worker, Database) abre com uma fileira de
+stats: CPU, RAM e os números/percentis do domínio (req/s + p95/p99 na API;
+jobs/s, duração p95, espera p95 e fila no Worker; conexões, TPS e cache hit no
+Database).
+
+Nota de runtime: a visão *por container* do cAdvisor exige um runtime que
+exponha os containers a ele (Docker Desktop/Linux). Sob OrbStack o cAdvisor só
+enxerga o cgroup raiz — por isso os painéis usam host + processo, que não
+dependem dessa introspecção.
 
 ### Web e disponibilidade (blackbox-exporter)
 

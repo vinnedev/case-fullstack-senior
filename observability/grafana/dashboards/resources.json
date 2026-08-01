@@ -1,31 +1,434 @@
 {
-  "uid": "relay-resources",
   "title": "Resources",
+  "uid": "relay-resources",
+  "tags": [
+    "relay"
+  ],
   "schemaVersion": 39,
-  "version": 1,
-  "refresh": "10s",
   "time": {
     "from": "now-5m",
     "to": "now"
   },
-  "tags": [
-    "relay",
-    "resources"
-  ],
+  "refresh": "10s",
+  "timezone": "browser",
+  "description": "Recursos do host (cgroup raiz do cAdvisor) e por processo (process_* de cada serviço). Nota: sob runtimes que não expõem containers ao cAdvisor (ex.: OrbStack), a visão por container não existe — host + processo cobrem CPU/RAM; rede e disco são do host.",
   "panels": [
     {
-      "id": 1,
-      "type": "timeseries",
-      "title": "CPU por container",
-      "gridPos": {
-        "x": 0,
-        "y": 0,
-        "w": 12,
-        "h": 8
-      },
+      "type": "stat",
+      "title": "CPU do host",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "area",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(container_cpu_usage_seconds_total{id=\"/\"}[2m])) * 100 / scalar(machine_cpu_cores)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "RAM do host",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "area",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "container_memory_working_set_bytes{id=\"/\"} * 100 / scalar(machine_memory_bytes)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Rede RX",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "area",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(container_network_receive_bytes_total{id=\"/\"}[2m]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Rede TX",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "area",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(container_network_transmit_bytes_total{id=\"/\"}[2m]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Disco leitura",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "area",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(container_fs_reads_bytes_total{id=\"/\"}[2m]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Disco escrita",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "area",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(container_fs_writes_bytes_total{id=\"/\"}[2m]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "CPU api",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "area",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(process_cpu_seconds_total{job=\"api\"}[2m]) * 100",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "RAM api",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "area",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "process_resident_memory_bytes{job=\"api\"}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "CPU worker",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "area",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(process_cpu_seconds_total{job=\"worker\"}[2m]) * 100",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "RAM worker",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "area",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "process_resident_memory_bytes{job=\"worker\"}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU do host (%)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
       },
       "fieldConfig": {
         "defaults": {
@@ -36,24 +439,27 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(container_cpu_usage_seconds_total{container!=\"\",container!=\"/\"}[5m])) by (name) * 100",
-          "legendFormat": "{{name}}"
+          "expr": "sum(rate(container_cpu_usage_seconds_total{id=\"/\"}[2m])) * 100 / scalar(machine_cpu_cores)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": "cpu %"
         }
       ]
     },
     {
-      "id": 2,
       "type": "timeseries",
-      "title": "Memória residente por container",
-      "gridPos": {
-        "x": 12,
-        "y": 0,
-        "w": 12,
-        "h": 8
-      },
+      "title": "Memória do host",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
       },
       "fieldConfig": {
         "defaults": {
@@ -64,53 +470,27 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(container_memory_working_set_bytes{container!=\"\",container!=\"/\"}) by (name)",
-          "legendFormat": "{{name}}"
+          "expr": "container_memory_working_set_bytes{id=\"/\"}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": "working set"
         }
       ]
     },
     {
-      "id": 3,
       "type": "timeseries",
-      "title": "Memória usada / limite",
+      "title": "Rede do host (RX/TX)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "gridPos": {
         "x": 0,
-        "y": 8,
+        "y": 16,
         "w": 12,
         "h": 8
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "max": 1
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(container_memory_working_set_bytes{container!=\"\",container!=\"/\"}) by (name) / sum(container_spec_memory_limit_bytes{container!=\"\",container!=\"/\"}) by (name)",
-          "legendFormat": "{{name}}"
-        }
-      ]
-    },
-    {
-      "id": 4,
-      "type": "timeseries",
-      "title": "Rede por container",
-      "gridPos": {
-        "x": 12,
-        "y": 8,
-        "w": 12,
-        "h": 8
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
       },
       "fieldConfig": {
         "defaults": {
@@ -121,13 +501,123 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(container_network_receive_bytes_total{container!=\"\",container!=\"/\"}[5m])) by (name)",
-          "legendFormat": "RX {{name}}"
+          "expr": "sum(rate(container_network_receive_bytes_total{id=\"/\"}[2m]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": "rx"
         },
         {
           "refId": "B",
-          "expr": "sum(rate(container_network_transmit_bytes_total{container!=\"\",container!=\"/\"}[5m])) by (name)",
-          "legendFormat": "TX {{name}}"
+          "expr": "sum(rate(container_network_transmit_bytes_total{id=\"/\"}[2m]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": "tx"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Disco do host (leitura/escrita)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(container_fs_reads_bytes_total{id=\"/\"}[2m]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": "read"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(container_fs_writes_bytes_total{id=\"/\"}[2m]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": "write"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU por serviço (%)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(process_cpu_seconds_total{job=~\"api|worker|postgres|prometheus\"}[2m]) * 100",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": "{{job}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "RAM por serviço",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "process_resident_memory_bytes{job=~\"api|worker|postgres|prometheus\"}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "legendFormat": "{{job}}"
         }
       ]
     }
