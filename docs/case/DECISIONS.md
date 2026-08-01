@@ -57,11 +57,11 @@ revisável e testável antes de discutir capacidade.
 
 - **Isolamento por tenant** (`api/modules/jobs/service.py`, `routes.py`): todas as queries de leitura/mutação de job ganharam `AND company_id = %s` vindo do contexto autenticado. Job de outra empresa responde 404 (não 403, para não confirmar existência do ID). Verificação: testes `test_*_isolated_by_tenant` cobrindo get, result, cancel e retry cruzando tenants.
 
-- **Role no admin** (`modules/admin/routes.py`): dependency `require_admin` → 403 para não-admin. Testado.
+- **Role no admin** (`modules/admin/routes.py`): dependency `require_admin` → 403 para não-admin. E a role admin **não** dá poder cross-tenant nas rotas `/jobs*`: leitura de job e do resultado sensível de outra empresa segue 404, e as visões administrativas nunca expõem payload/erro — só id, status e contagens. Verificação: `TestR4AdminRole` (403, roles fora da whitelist fail-closed em 401, mutação e leitura cross-tenant com admin, ausência de payload nas rotas admin).
 
 - **Sintoma 1 (listagem lenta)**: o N+1 virou uma única query paginada. Na primeira entrega, calculei `result_count` com `LEFT JOIN + count + GROUP BY`; isso eliminou o N+1 e limitou a resposta a no máximo 200 itens. O benchmark posterior mostrou que `GROUP BY j.id` ainda agregava os 100k jobs da empresa antes do `LIMIT`: 64ms por request no `EXPLAIN ANALYZE`, média de 227ms sob 50 VUs. A evolução foi paginar primeiro pelo índice `(company_id, created_at)` e contar resultados apenas para as linhas da página, com subquery correlata no índice único de `job_results`: 0,26ms no mesmo `EXPLAIN`, 246× mais rápido. Com 20.000 jobs, a carga é reproduzível com `db/populate_jobs.sql`; os números detalhados, planos e cenários estão em [benchmark/README.md](../../benchmark/README.md). Índices continuam dirigidos pelas queries reais, sem indexar colunas de baixa cardinalidade isoladas.
 
-- **Sintoma 2 (duplicação/limite furado)**: no `create_job`, `SELECT ... FOR UPDATE` na linha da company serializa criações da mesma empresa (empresas diferentes não competem). No worker, claim com `FOR UPDATE SKIP LOCKED`. Resultado único garantido no banco: `UNIQUE (job_id)` + `INSERT ... ON CONFLICT DO NOTHING`, e a quota só é debitada quando o insert de resultado realmente acontece. Verificação: 20 POSTs simultâneos → exatamente 2 aceitos (limite 2), 18× 429, além do teste `test_result_and_quota_are_idempotent`.
+- **Sintoma 2 (duplicação/limite furado)**: no `create_job`, `SELECT ... FOR UPDATE` na linha da company serializa criações da mesma empresa (empresas diferentes não competem). No worker, claim com `FOR UPDATE SKIP LOCKED`. Resultado único garantido no banco: `UNIQUE (job_id)` + `INSERT ... ON CONFLICT DO NOTHING`, e a quota só é debitada quando o insert de resultado realmente acontece. Verificação: 20 POSTs simultâneos → exatamente 2 aceitos (limite 2), 18× 429; automatizado em `api/tests/integration/test_race_conditions.py` com threads reais contra Postgres (asserta exatamente 2×201 + 10×429, e `[200, 409]` no duplo cancel/retry disputado), além do `test_result_and_quota_are_idempotent` no worker.
 
 - **Sintoma 3 (falha não rastreável)**: colunas `trace_id` e `last_error` (migration `0003`). A API grava o `request_id` do log como `trace_id` do job e o worker propaga o mesmo trace em todos os eventos. Na falha, o worker faz rollback do trabalho parcial mas **persiste** `attempts`, `last_error` e `status='failed'` em transação própria. O retry manual reenfileira enquanto `attempts < 3`. Logging inteiro reformulado para *wide events* (um JSON por request/job, enriquecido progressivamente, filosofia de loggingsucks.com), com tail sampling: erros e lentos sempre logam. Verificação: injetei falha real e segui o trace da submissão HTTP até o `failed` com `last_error` no banco.
 
@@ -176,6 +176,33 @@ identidade capturada pela própria mutação, e detalhes `queued`/`running` faze
 polling até atingir estado terminal. Assim, a transição para `done` também
 habilita a busca do resultado sem fechar e reabrir o painel.
 
+### Como auditar esta entrega — cada garantia e sua prova executável
+
+Nenhuma afirmação deste documento depende da minha palavra: toda garantia
+central tem um teste re-executável (`(cd api && uv run pytest -q)`,
+`(cd worker && uv run pytest -q)` — Postgres real via testcontainers) ou um
+cenário de carga reproduzível (`benchmark/run.sh <cenário>`).
+
+| Garantia | Prova executável |
+|---|---|
+| Isolamento por tenant (leitura, mutação, resultado sensível) | `TestR3TenantIsolation` + `test_*_isolated_by_tenant` (rotas) |
+| Role admin sem poder cross-tenant; admin nunca vê payload | `TestR4AdminRole` |
+| Limite de concorrência sob corrida real | `test_race_conditions.py` (threads: exatamente 2×201 + 10×429) |
+| Duplo cancel/retry disputado → um vencedor | `test_race_conditions.py` (asserta `[200, 409]`) |
+| Resultado gravado e quota debitada **uma vez** | `test_result_and_quota_are_idempotent` (worker) |
+| Cancel no meio do processamento descarta o parcial | `test_cancelled_mid_flight_rolls_back_and_stops_current_processing` |
+| Cancelar o job X não aborta o job Y (payload do NOTIFY) | `test_cancel_notify_for_other_job_is_ignored` |
+| Conexão volta ao pool sem assinatura de LISTEN | `test_monitor_unlistens_before_returning_connection` |
+| Contrato original do case byte a byte (`/admin/jobs` etc.) | `test_admin_jobs_keeps_original_case_contract` + curls do próprio [KNOWN_ISSUES.md](KNOWN_ISSUES.md) |
+| OpenAPI espelha rota a rota os códigos possíveis (incl. 503) | `TestR12OpenApiContract::test_declared_error_responses_match_route_behavior` |
+| Erro de domínio novo nunca vira 500 silencioso | `test_errors_contract.py` (varre `JobsDomainError.__subclasses__()`) |
+| `X-Request-ID` = `trace_id` do job, presente até no 503 | `test_request_id.py` |
+| Migrations idempotentes no boot e sob 2 runners concorrentes | `test_second_run_is_a_noop`, `test_concurrent_runners_apply_each_migration_exactly_once` |
+| Ciclo up → down total → up reprodutível; toda migration tem down | `test_up_down_full_cycle`, `test_every_migration_has_a_down_file` |
+| Índices de scheduling realmente usados pelo planner | `test_scheduling_indexes.py` (`EXPLAIN` real com 10k retries futuros) |
+| Corridas em volume (replay, duplo retry, cancel concorrente) | `benchmark/run.sh chaos` — rodada final: 0% falhas, todo conflito com um único vencedor |
+| Capacidade de leitura a 100k jobs | `benchmark/run.sh read` — números e planos em [benchmark/README.md](../../benchmark/README.md) |
+
 ### Redução de ruídos de observabilidade
 
 A primeira versão de `LOG_SUPPRESS_PROBE_ROUTES` filtrava só o wide event, e o
@@ -267,6 +294,23 @@ O que você **não** implementou de propósito e por quê (prazo, escopo, custo 
 benefício). Um "deixei de fora, e aqui está o raciocínio" vale mais que um item
 mal-feito.
 
+Resumo das recusas — uma linha por decisão, com o raciocínio completo indicado:
+
+| Recusei | Por quê, em uma linha | Raciocínio |
+|---|---|---|
+| ORM (SQLAlchemy + Alembic) | Viola critério explícito do case; `EXPLAIN` deixa de bater 1:1 com o código | [§5](#5-uso-de-ia--reflexão-honesta) |
+| Broker dedicado (Redis/RabbitMQ/SQS) | Fila-na-tabela mantém tudo transacional; a troca está desenhada para não exigir reescrita | abaixo e [§7](#7-próximos-passos-com-mais-tempo) |
+| Bibliotecas de fila em Postgres (pgqueuer/pgmq/pgque) | Mesmos primitivos que já uso, trocando as regras do case por convenções genéricas | [§3](#3-trade-offs-e-decisões-de-design) |
+| Push em tempo real (SSE/WebSocket) | Estado por conexão, proxies, auth por header — polling adaptativo barato vence neste perfil | [§3](#3-trade-offs-e-decisões-de-design) |
+| Busca por substring + índice trigram | Otimização correta de uma feature que não deveria existir; GIN cobraria o caminho quente de escrita | [§5](#5-uso-de-ia--reflexão-honesta) |
+| Índices especulativos (status, kind isolados) | Cardinalidade baixa: o planner não usaria; só custo de escrita/RAM | [§5](#5-uso-de-ia--reflexão-honesta) |
+| Repository/use-cases granulares | Indireção sem ganho neste tamanho; service por módulo basta | [§3](#3-trade-offs-e-decisões-de-design) |
+| Constraint/trigger para o limite de concorrência | Mais invasivo para uma regra que tende a virar configurável | [§3](#3-trade-offs-e-decisões-de-design) |
+| Enforcement da `job_quota` | É regra de produto que o enunciado não define; não invento comportamento | abaixo e [§7](#7-próximos-passos-com-mais-tempo) |
+| Cursor pagination | Complexidade antes do padrão de acesso exigir | abaixo |
+| Autenticação real (JWT/OIDC) | Simplificação declarada do case; deixei a costura única pronta | abaixo |
+| E2E de front (Playwright) | Front mínimo; a API está coberta pela bateria adversarial | abaixo |
+
 - **Autenticação real**: o case declara o `X-Auth` como simplificação proposital. Endureci o parsing (401 para formato inválido) e deixei o `AuthContext` como costura única onde um JWT entraria.
 
 - **Handlers sem limite de duração conhecido**: o worker renova o lease em background, mas um handler real ainda deveria declarar timeout próprio, política de cancelamento e limites de recursos. O executor do case é deliberadamente previsível.
@@ -308,8 +352,7 @@ mal-feito.
   - **O ORM**: o [TASKS.md](TASKS.md) é claro: "SQL cru via psycopg — mantenha o padrão (sem ORM)". Reverti para psycopg puro com pool, mantendo a arquitetura de services. As queries ficaram mais explícitas e o `EXPLAIN` bate 1:1 com o que está no código.
   - **Fila/pub-sub em camada de aplicação**: a sugestão inicial era polling puro e, depois, um broker externo. Rejeitei os dois e fui estudar o LISTEN/NOTIFY nativo do Postgres, pois já conhecia a capacidade e robustez. Para *sinalização* ele aguenta alto volume com custo mínimo e entrega no commit, exatamente o que eu precisava aqui, desde que não seja tratado como fila durável (payload 8KB, sem entrega garantida sem listener). A tabela continua sendo a fila e o NOTIFY substitui o polling. Ferramenta nativa, zero dependência nova, e o fallback de 30s cobre o caso de notify perdido.
   - **Índices especulativos** (status isolado, kind): o planner não os usaria com cardinalidade baixa e custariam escrita/RAM. Mantive só os que o `EXPLAIN` prova.
-  - **Busca por substring + índice trigram**: a IA sugeriu um parâmetro `search` com `kind ILIKE '%termo%'` na listagem e, depois, um GIN `pg_trgm` para torná-lo rápido. Recusei e removi a feature inteira, o case não pede busca, `kind` é na prática um vocabulário fechado (a UI só submete `report`). Era uma otimização tecnicamente correta de uma feature que não deveria existir — o erro estava uma camada acima do índice.
-  - **TRGM**: Existia um campo "kind" que após testes de benchmarks a IA perdeu o contexto e tentou otimizar algo que é "tipado" para realizar uma busca performática por termo/relevância, mas o kind não é por exemplo o nome de um produto e sim um tipo, usar TRGM ou até mesmo mecanismos parecidos com FULLTEXT Index seria anti-pattern / overengineer.
+  - **Busca por substring + índice trigram**: a IA sugeriu um parâmetro `search` com `kind ILIKE '%termo%'` na listagem e, depois de benchmarks, um GIN `pg_trgm` para torná-lo rápido. Recusei e removi a feature inteira: o case não pede busca, e `kind` não é texto de produto — é um **tipo**, vocabulário na prática fechado (a UI só submete `report`). Buscar substring/relevância num identificador de tipo é anti-pattern, e o GIN ainda cobraria escrita na tabela que é a própria fila. Era uma otimização tecnicamente correta de uma feature que não deveria existir — o erro estava uma camada acima do índice.
 ---
 
 ## 6. Casos de borda
@@ -327,7 +370,7 @@ que não trata).
 
 - NOTIFY perdido (worker desconectado no momento do commit): fallback de polling de 30s garante progresso.
 
-- `X-Auth` malformado em 7 variações (vazio, sem `:`, id não-numérico, id ≤ 0, role vazia): sempre 401, nunca 500.
+- `X-Auth` malformado em 16 variações (vazio, sem `:`, id não-numérico, id ≤ 0, float, notação científica, espaços, `+1`, zero à esquerda — que o `int()` do Python aceitaria —, role vazia): sempre 401, nunca 500, parametrizado sobre **todas** as rotas em `TestR1AuthMandatory`.
 
 - Tentativa de SQL injection no `kind`: armazenado literalmente (parâmetros bind), testado.
 
