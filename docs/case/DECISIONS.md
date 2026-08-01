@@ -278,6 +278,8 @@ ponta a ponta; como resolveu a corrida do cancelamento.)
 
 - **404 (e não 403) para recurso de outro tenant**: não vazar a existência do ID.
 
+- **Visão administrativa global, por contrato**: o [README do case](README.md) define `GET /admin/jobs` como "retorna jobs de **todas** as empresas", com exemplo mostrando as duas — o bug plantado era a ausência de checagem de *role*, não de tenant. Mantive esse contrato à risca e tratei o que seria vazamento de verdade: mesmo com role admin, job, **resultado sensível** e erro de outra empresa seguem 404 nas rotas `/jobs*`, e as rotas `/admin/*` expõem só id, status e contagens — nunca payload (garantido por `TestR4AdminRole`, incluindo o teste de que nenhuma resposta admin carrega `payload`/`last_error`/`kind`). Num produto real, "admin da Acme" e "operador da plataforma" seriam papéis distintos — essa separação está mapeada no [§7](#7-próximos-passos-com-mais-tempo) junto com a troca do `X-Auth` por token com claims.
+
 - **Testes contra Postgres real (testcontainers)**: as garantias centrais do case *são* comportamento de Postgres (SKIP LOCKED, ON CONFLICT, locks de linha), portanto evitei mocks e SQLite para testes.
 
 ### Decisões refinadas após o benchmark
