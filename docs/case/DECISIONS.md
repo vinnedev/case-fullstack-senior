@@ -402,6 +402,14 @@ O que você faria a seguir.
 
 - **Baratear o `count(*)` do `X-Total-Count`**: o benchmark mostrou que, com a listagem otimizada, o total exato virou 97% do tempo de banco do caminho de leitura (24ms por página a 100k jobs). Alavancas possíveis: cachear o total por tenant, estimar acima de um teto com `reltuples` ou tornar o header opcional. Mantive o exato de propósito, correto e barato o suficiente no volume do case.
 
+- **Pipeline de detecção de vulnerabilidade** usar ferramentas tal como Snyk para busca de vulnerabilidades e solução mais robusta para além de código e dependencias analisar o container da aplicação.
+
+- **Canary ou blue - green deployment** caso fosse um projeto que fosse necessariamente novo "feito do zero" sem templates, pensaria numa base de deploment testavel e divisivel antes de direcionar todo o trafego para produção.
+
+- **Auto scaling** garantir que minha aplicação escale horizontalmente e configurar cada serviço para escalar quando necessario.
+
+- **IaC** infra as code, usaria soluções como Terraform ou Pulumi para versionar a infra e subir com facilidade no ambiente, ajuda muito em caso de incidentes, ter toda a infra em código e versionada, o custo técnico para subir a aplicação toda do zero é baixo, preferencialmente Terraform por ser uma solução mais madura, se for projeto mais simples, Pulumi também atende bem.
+
 ---
 
 **Tempo investido:** 12 ~ 14 horas (Os problemas foram resolvidos relativamente rápido, o restante das horas foram investidas em estudos das ferramentas, benchmarks, testes e revisão manual pensando que é um serviço crítico e de demanda elevada)
